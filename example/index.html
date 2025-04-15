@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebDHT Browser Example</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 10px;
+      line-height: 1.4;
+      background-color: #f7f9fc;
+      min-height: 100vh;
+    }
+    .container {
+      width: 100%;
+      max-width: 1200px;
+      margin: 0 auto;
+      background-color: white;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    .flex-layout {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 15px;
+      justify-content: space-between;
+    }
+    .card {
+      background: #f5f5f5;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      padding: 12px;
+      margin-bottom: 15px;
+      flex: 1 1 300px;
+    }
+    .card-full {
+      flex: 1 1 100%;
+    }
+    .form-group {
+      margin-bottom: 10px;
+    }
+    label {
+      display: block;
+      margin-bottom: 3px;
+      font-weight: bold;
+    }
+    input, textarea {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      box-sizing: border-box;
+    }
+    textarea {
+      height: 80px;
+      resize: vertical;
+    }
+    .button {
+      background: #4C8BF5;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 3px;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    .button:hover {
+      background: #3b7de8;
+    }
+    .status {
+      font-weight: bold;
+      margin-bottom: 8px;
+      color: #0a60ff;
+    }
+    .peer-id {
+      font-family: monospace;
+      word-break: break-all;
+      background: #e8f0fe;
+      padding: 8px;
+      border-radius: 5px;
+      border: 1px solid #c2d7ff;
+      font-size: 0.9em;
+      max-height: 60px;
+      overflow-y: auto;
+    }
+    .result {
+      background: #e6f7ff;
+      padding: 10px;
+      border-radius: 5px;
+      margin-top: 10px;
+      border: 1px solid #b3e0ff;
+      max-height: 150px;
+      overflow-y: auto;
+    }
+    h1 {
+      color: #1a73e8;
+      margin-top: 0;
+      margin-bottom: 10px;
+    }
+    h2 {
+      color: #3c4043;
+      margin-top: 15px;
+      margin-bottom: 10px;
+    }
+    h3 {
+      margin-top: 0;
+      margin-bottom: 10px;
+    }
+    p {
+      margin-top: 0;
+      margin-bottom: 10px;
+    }
+    @media (max-width: 768px) {
+      .flex-layout {
+        flex-direction: column;
+      }
+      .card {
+        flex: 1 1 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>WebDHT Browser Example</h1>
+    <p>This example demonstrates a Kademlia-like DHT using WebRTC for peer connections.</p>
+    
+    <div class="card card-full">
+      <p class="status" id="status">Initializing...</p>
+      <h3>Your Node ID</h3>
+      <p class="peer-id" id="peerId">Loading...</p>
+    </div>
+    
+    <div class="flex-layout">
+      <div class="card">
+        <h3>Connect to a Peer</h3>
+        <form id="connectForm">
+          <div class="form-group">
+            <label for="peerInfo">Peer Signal Data</label>
+            <textarea id="peerInfo" placeholder="Paste peer signal data here"></textarea>
+          </div>
+          <button class="button" type="submit">Connect</button>
+        </form>
+      </div>
+      
+      <div class="card">
+        <h3>Store Value</h3>
+        <form id="storeForm">
+          <div class="form-group">
+            <label for="storeKey">Key</label>
+            <input type="text" id="storeKey" placeholder="Enter key">
+          </div>
+          <div class="form-group">
+            <label for="storeValue">Value</label>
+            <input type="text" id="storeValue" placeholder="Enter value">
+          </div>
+          <button class="button" type="submit">Store</button>
+        </form>
+      </div>
+      
+      <div class="card">
+        <h3>Retrieve Value</h3>
+        <form id="retrieveForm">
+          <div class="form-group">
+            <label for="retrieveKey">Key</label>
+            <input type="text" id="retrieveKey" placeholder="Enter key">
+          </div>
+          <button class="button" type="submit">Retrieve</button>
+        </form>
+      </div>
+    </div>
+    
+    <div class="result" id="result"></div>
+    
+    <div class="flex-layout">
+      <div class="card">
+        <h3>Connected Peers</h3>
+        <div id="peers">No connected peers</div>
+      </div>
+      
+      <div class="card">
+        <h3>SHA1 Demo</h3>
+        <p>Generate multiple random peer IDs to test SHA1 implementation:</p>
+        <button class="button" id="demoButton">Generate 5 Peer IDs</button>
+      </div>
+    </div>
+  </div>
+  
+  <script type="module" src="/example/browser.js"></script>
+</body>
+</html>
