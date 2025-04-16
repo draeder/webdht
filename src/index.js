@@ -14,8 +14,8 @@ import { sha1 as simpleSha1, generateRandomId } from './sha1.js';
 // Export the DHT class as the default export
 export default DHT;
 
-// Also export utils and peer for advanced usage
-export { Peer, utils };
+// Also export DHT as WebDHT for named imports
+export { DHT as WebDHT, Peer, utils };
 
 // Export SHA1 functions directly for convenience
 export { simpleSha1 as sha1, generateRandomId };

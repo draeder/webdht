@@ -1,19 +1,44 @@
 {
-  "name": "webdht",
-  "version": "0.1.0",
-  "description": "Kademlia-like DHT for browsers and Node.js using simple-peer",
+  "name": "@draeder/webdht",
+  "version": "0.1.2",
+  "description": "A Kademlia-like Distributed Hash Table (DHT) that works seamlessly in both browser and Node.js environments using WebRTC for peer connections.",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "start": "node example/server.js",
-    "test": "echo \"No tests yet\""
+    "start": "node server.js",
+    "test": "echo \"No tests yet\"",
+    "prepare": "npm run test"
   },
-  "keywords": ["dht", "kademlia", "webrtc", "simple-peer", "browser", "node"],
-  "author": "",
+  "files": [
+    "src/",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "dht",
+    "kademlia",
+    "webrtc",
+    "simple-peer",
+    "browser",
+    "node"
+  ],
+  "author": "Dan Raeder",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/draeder/webdht.git"
+  },
+  "bugs": {
+    "url": "https://github.com/draeder/webdht/issues"
+  },
+  "homepage": "https://github.com/draeder/webdht#readme",
   "dependencies": {
     "@koush/wrtc": "^0.5.3",
-    "express": "^4.18.2",
-    "simple-peer": "^9.11.1"
+    "simple-peer": "^9.11.1",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "express": "^4.21.2"
   }
 }

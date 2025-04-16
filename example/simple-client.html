@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebDHT Simple Client</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background-color: #f4f6f8;
+      color: #333;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    .panel {
+      background-color: white;
+      border-radius: 8px;
+      padding: 15px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    h1, h2, h3 {
+      color: #2c3e50;
+    }
+    button {
+      background-color: #3498db;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 5px 0;
+    }
+    button:hover {
+      background-color: #2980b9;
+    }
+    input, textarea {
+      width: 100%;
+      padding: 8px;
+      margin: 5px 0;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      box-sizing: border-box;
+    }
+    #log {
+      height: 300px;
+      overflow-y: auto;
+      background-color: #f8f9fa;
+      padding: 10px;
+      border-radius: 4px;
+      border: 1px solid #ddd;
+      font-family: monospace;
+      white-space: pre-wrap;
+    }
+    .log-entry {
+      margin: 2px 0;
+      font-size: 12px;
+    }
+    .log-time {
+      color: #7f8c8d;
+    }
+    #peers-list {
+      list-style-type: none;
+      padding: 0;
+    }
+    #peers-list li {
+      padding: 8px;
+      margin: 5px 0;
+      background-color: #ecf0f1;
+      border-radius: 4px;
+    }
+    .connected {
+      border-left: 4px solid #2ecc71;
+    }
+    .disconnected {
+      border-left: 4px solid #e74c3c;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="panel">
+      <h1>WebDHT Simple Client</h1>
+      <div>
+        <h3>Your Node ID: <span id="node-id">Connecting...</span></h3>
+        <div id="log"></div>
+        <div class="actions">
+          <button id="clear-log">Clear Log</button>
+        </div>
+      </div>
+      
+      <div>
+        <h3>DHT Actions</h3>
+        <div>
+          <input type="text" id="key-input" placeholder="Key">
+          <input type="text" id="value-input" placeholder="Value">
+          <div class="actions">
+            <button id="put-btn">PUT</button>
+            <button id="get-btn">GET</button>
+            <button id="test-dht-btn">Test DHT</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Connection Management</h2>
+      <div>
+        <h3>Connected Peers</h3>
+        <ul id="peers-list"></ul>
+      </div>
+      
+      <div>
+        <h3>Manual Connect</h3>
+        <input type="text" id="peer-id-input" placeholder="Enter Peer ID">
+        <button id="connect-btn">Connect</button>
+      </div>
+      
+      <div>
+        <h3>Manual Signal</h3>
+        <textarea id="signal-input" placeholder="Paste signal data here" rows="5"></textarea>
+        <div class="actions">
+          <button id="signal-btn">Process Signal</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.6.1/dist/socket.io.min.js"></script>
+  <script src="../dist/webdht.min.js"></script>
+  
+  <script>
+    // Create a simple DHT node
+    let dht = null;
+    let socket = null;
+    const connectedPeers = new Map(); // Map of connected peers (peerId -> peer object)
+    
+    // Initialize the log
+    const logElement = document.getElementById('log');
+    function log(message) {
+      const now = new Date();
+      const timestamp = now.toLocaleTimeString();
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      entry.innerHTML = `<span class="log-time">[${timestamp}]</span> ${message}`;
+      logElement.appendChild(entry);
+      logElement.scrollTop = logElement.scrollHeight;
+      console.log(`[${timestamp}] ${message}`);
+    }
+    
+    // Connect to the signaling server
+    function connectToSignalingServer() {
+      log('Connecting to signaling server...');
+      
+      socket = io('http://localhost:3001');
+      
+      socket.on('connect', () => {
+        log('Connected to signaling server');
+        
+        // Add a small random delay to prevent racing conditions
+        const delay = Math.floor(Math.random() * 300);
+        log(`Initializing DHT with ${delay}ms delay to prevent racing...`);
+        
+        setTimeout(() => {
+          initializeDHT();
+        }, delay);
+      });
+      
+      socket.on('disconnect', () => {
+        log('Disconnected from signaling server');
+      });
+      
+      socket.on('error', (error) => {
+        log(`Signaling error: ${error}`);
+      });
+      
+      // Listen for signal data from other peers
+      socket.on('signal', (data) => {
+        // data = { from: peerId, data: signalData }
+        const fromPeerId = data.from;
+        const signalData = data.data;
+        
+        log(`Received signal from peer: ${fromPeerId.substring(0, 8)}...`);
+        log(`Signal data type: ${signalData.type || 'candidate'}`);
+        
+        // Process the signal - important to handle both connected and unconnected peers
+        processPeerSignal(fromPeerId, signalData);
+      });
+      
+      // Get the list of peers from the server
+      socket.on('peers', (peers) => {
+        log(`Received list of ${peers.length} peers`);
+        
+        // Connect to each peer
+        peers.forEach(peerId => {
+          if (peerId !== dht.nodeIdHex) {
+            initiateConnection(peerId);
+          }
+        });
+      });
+    }
+    
+    // Initialize the DHT
+    function initializeDHT() {
+      log('Creating DHT node...');
+      
+      // Create a new DHT instance
+      dht = new WebDHT.DHT();
+      
+      // Show our node ID
+      document.getElementById('node-id').textContent = dht.nodeIdHex;
+      log(`DHT node ready with ID: ${dht.nodeIdHex}`);
+      
+      // Register with the signaling server
+      socket.emit('register', dht.nodeIdHex);
+      
+      // Listen for DHT events
+      dht.on('peer:connect', (peerId) => {
+        log(`Connected to peer: ${peerId.substring(0, 8)}...`);
+        updatePeersList();
+        
+        // Automatically test DHT functionality when connected
+        testDHTWithPeer(peerId);
+      });
+      
+      dht.on('peer:disconnect', (peerId) => {
+        log(`Disconnected from peer: ${peerId}`);
+        updatePeersList();
+      });
+      
+      dht.on('peer:error', (error, peerId) => {
+        log(`Peer error with ${peerId?.substring(0, 8) || 'unknown'}: ${error.message}`);
+      });
+      
+      // Listen for signals from DHT peers
+      dht.on('peer:signal', (signalData, peerId) => {
+        log(`Sending signal to peer: ${peerId.substring(0, 8)}...`);
+        log(`Signal type: ${signalData.type || 'candidate'}`);
+        
+        // Send the signal data to the target peer via the signaling server
+        socket.emit('signal', {
+          to: peerId,
+          data: signalData
+        });
+      });
+    }
+    
+    // Initiate a connection to a peer
+    function initiateConnection(peerId) {
+      log(`Initiating connection to peer: ${peerId.substring(0, 8)}...`);
+      
+      // We'll always be the initiator when we initiate the connection
+      const peer = dht.connect({
+        id: peerId,
+        initiator: true
+      });
+      
+      if (peer) {
+        log(`Connection initiated to ${peerId.substring(0, 8)}...`);
+      } else {
+        log(`Failed to initiate connection to ${peerId.substring(0, 8)}...`);
+      }
+    }
+    
+    // Process a signal from a peer
+    function processPeerSignal(peerId, signalData) {
+      try {
+        // Check if we already have a connection to this peer
+        let peer = dht.peers.get(peerId);
+        
+        if (!peer) {
+          // If we don't have a connection, create one
+          log(`Creating new peer connection for signal from ${peerId.substring(0, 8)}...`);
+          
+          // We'll be the responder when we receive a signal
+          peer = dht.connect({
+            id: peerId,
+            initiator: false, // We're the responder
+            signal: signalData  // Pass the initial signal data
+          });
+        } else {
+          // If we already have a connection, just pass the signal data
+          log(`Passing signal to existing peer ${peerId.substring(0, 8)}...`);
+          peer.signal(signalData);
+        }
+      } catch (error) {
+        log(`Error processing signal: ${error.message}`);
+      }
+    }
+    
+    // Test DHT functionality with a connected peer
+    function testDHTWithPeer(peerId) {
+      log(`Testing DHT with peer ${peerId.substring(0, 8)}...`);
+      
+      const testKey = `test-key-${Date.now()}`;
+      const testValue = `test-value-${Date.now()}`;
+      
+      // Store a value
+      log(`Storing key: ${testKey}, value: ${testValue}`);
+      dht.put(testKey, testValue)
+        .then(success => {
+          log(`PUT success: ${success}`);
+          
+          // Retrieve the value
+          return dht.get(testKey);
+        })
+        .then(retrievedValue => {
+          log(`GET result: ${retrievedValue}`);
+          if (retrievedValue === testValue) {
+            log('✅ DHT test successful! Values match.');
+          } else {
+            log('❌ DHT test failed! Values do not match.');
+          }
+        })
+        .catch(error => {
+          log(`DHT test error: ${error.message}`);
+        });
+    }
+    
+    // Update the list of connected peers
+    function updatePeersList() {
+      const peersList = document.getElementById('peers-list');
+      peersList.innerHTML = '';
+      
+      // Get all peers from the DHT
+      if (dht && dht.peers) {
+        dht.peers.forEach((peer, peerId) => {
+          const li = document.createElement('li');
+          li.className = peer.connected ? 'connected' : 'disconnected';
+          li.textContent = `${peerId.substring(0, 16)}... (${peer.connected ? 'Connected' : 'Disconnected'})`;
+          peersList.appendChild(li);
+        });
+      }
+      
+      // If no peers, show a message
+      if (peersList.children.length === 0) {
+        const li = document.createElement('li');
+        li.textContent = 'No peers connected';
+        peersList.appendChild(li);
+      }
+    }
+    
+    // PUT a key-value pair into the DHT
+    function putValue() {
+      const key = document.getElementById('key-input').value.trim();
+      const value = document.getElementById('value-input').value.trim();
+      
+      if (!key || !value) {
+        log('Please enter both key and value');
+        return;
+      }
+      
+      log(`Putting key: ${key}, value: ${value}`);
+      dht.put(key, value)
+        .then(success => {
+          log(`PUT success: ${success}`);
+        })
+        .catch(error => {
+          log(`PUT error: ${error.message}`);
+        });
+    }
+    
+    // GET a value from the DHT by key
+    function getValue() {
+      const key = document.getElementById('key-input').value.trim();
+      
+      if (!key) {
+        log('Please enter a key');
+        return;
+      }
+      
+      log(`Getting value for key: ${key}`);
+      dht.get(key)
+        .then(value => {
+          log(`GET result: ${value}`);
+        })
+        .catch(error => {
+          log(`GET error: ${error.message}`);
+        });
+    }
+    
+    // Setup event listeners
+    document.addEventListener('DOMContentLoaded', () => {
+      // Clear log button
+      document.getElementById('clear-log').addEventListener('click', () => {
+        document.getElementById('log').innerHTML = '';
+      });
+      
+      // PUT button
+      document.getElementById('put-btn').addEventListener('click', putValue);
+      
+      // GET button
+      document.getElementById('get-btn').addEventListener('click', getValue);
+      
+      // Test DHT button
+      document.getElementById('test-dht-btn').addEventListener('click', () => {
+        // Generate test data
+        const testKey = `test-${Date.now()}`;
+        const testValue = `value-${Date.now()}`;
+        
+        // Set the input fields
+        document.getElementById('key-input').value = testKey;
+        document.getElementById('value-input').value = testValue;
+        
+        // Put the value
+        putValue();
+        
+        // Then get it after a short delay
+        setTimeout(getValue, 1000);
+      });
+      
+      // Connect button
+      document.getElementById('connect-btn').addEventListener('click', () => {
+        const peerId = document.getElementById('peer-id-input').value.trim();
+        
+        if (!peerId) {
+          log('Please enter a peer ID');
+          return;
+        }
+        
+        initiateConnection(peerId);
+      });
+      
+      // Signal button
+      document.getElementById('signal-btn').addEventListener('click', () => {
+        try {
+          const signalStr = document.getElementById('signal-input').value.trim();
+          
+          if (!signalStr) {
+            log('Please enter signal data');
+            return;
+          }
+          
+          // Parse the signal data - it should be in format {peerId, signalData}
+          const signalObj = JSON.parse(signalStr);
+          
+          if (!signalObj.peerId || !signalObj.signalData) {
+            log('Invalid signal format. Expected: {"peerId": "...", "signalData": {...}}');
+            return;
+          }
+          
+          processPeerSignal(signalObj.peerId, signalObj.signalData);
+        } catch (error) {
+          log(`Error processing manual signal: ${error.message}`);
+        }
+      });
+      
+      // Initialize the connection
+      connectToSignalingServer();
+      
+      // Update the peer list periodically
+      setInterval(updatePeersList, 2000);
+    });
+  </script>
+</body>
+</html>

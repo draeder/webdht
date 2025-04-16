@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebDHT Signaling Client Example</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 20px;
+      color: #333;
+    }
+    .container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+    }
+    .panel {
+      flex: 1;
+      min-width: 300px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      padding: 15px;
+      margin-bottom: 20px;
+    }
+    h1, h2 {
+      color: #2a6496;
+    }
+    pre {
+      background-color: #f5f5f5;
+      padding: 10px;
+      border-radius: 5px;
+      overflow: auto;
+      max-height: 200px;
+    }
+    button {
+      background-color: #2a6496;
+      color: white;
+      border: none;
+      padding: 8px 15px;
+      border-radius: 5px;
+      cursor: pointer;
+      margin-right: 10px;
+      margin-bottom: 10px;
+    }
+    button:hover {
+      background-color: #1d4568;
+    }
+    button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
+    input, textarea {
+      width: 100%;
+      padding: 8px;
+      margin-bottom: 10px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    .peer-list {
+      list-style-type: none;
+      padding: 0;
+    }
+    .peer-list li {
+      padding: 8px;
+      border-bottom: 1px solid #eee;
+      cursor: pointer;
+    }
+    .peer-list li:hover {
+      background-color: #f5f5f5;
+    }
+    #logs {
+      height: 200px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>WebDHT Signaling Client Example</h1>
+  <p>This example demonstrates how to use WebDHT with a signaling server to establish WebRTC connections between peers.</p>
+  
+  <div class="container">
+    <div class="panel">
+      <h2>My Node</h2>
+      <div>
+        <strong>Node ID:</strong> <span id="nodeId">Initializing...</span>
+      </div>
+      <div id="connectionStatus">Connecting to signaling server...</div>
+      <h3>DHT Operations</h3>
+      <div>
+        <h4>Store Value</h4>
+        <input type="text" id="storeKey" placeholder="Key">
+        <input type="text" id="storeValue" placeholder="Value">
+        <button id="storeBtn" disabled>Store</button>
+      </div>
+      <div>
+        <h4>Retrieve Value</h4>
+        <input type="text" id="retrieveKey" placeholder="Key">
+        <button id="retrieveBtn" disabled>Retrieve</button>
+        <div id="retrieveResult"></div>
+      </div>
+    </div>
+    
+    <div class="panel">
+      <h2>Connected Peers</h2>
+      <ul id="peerList" class="peer-list">
+        <li>No peers connected</li>
+      </ul>
+      <h3>Manual Connection</h3>
+      <textarea id="signalData" placeholder="Paste peer signal data here"></textarea>
+      <button id="connectBtn" disabled>Connect to Peer</button>
+    </div>
+  </div>
+  
+  <div class="panel">
+    <h2>Logs</h2>
+    <pre id="logs"></pre>
+    <button id="clearLogsBtn">Clear Logs</button>
+  </div>
+
+  <!-- Import socket.io client -->
+  <script src="/socket.io/socket.io.js"></script>
+  
+  <!-- Import simple-peer directly from CDN for more reliable WebRTC -->
+  <script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
+  
+  <!-- Import WebDHT from src directory -->
+  <script type="module">
+    import DHT from '../src/index.js';
+    
+    // Initialize logging
+    const logsElement = document.getElementById('logs');
+    function log(message) {
+      const time = new Date().toLocaleTimeString();
+      logsElement.textContent += `[${time}] ${message}\n`;
+      logsElement.scrollTop = logsElement.scrollHeight;
+    }
+    
+    document.getElementById('clearLogsBtn').addEventListener('click', () => {
+      logsElement.textContent = '';
+    });
+    
+    // Connect to the signaling server
+    const socket = io();
+    log('Connecting to signaling server...');
+    
+    socket.on('connect', () => {
+      log('Connected to signaling server');
+      document.getElementById('connectionStatus').textContent = 'Connected to signaling server';
+      
+      // Create the DHT node
+      initializeDHT();
+    });
+    
+    socket.on('disconnect', () => {
+      log('Disconnected from signaling server');
+      document.getElementById('connectionStatus').textContent = 'Disconnected from signaling server';
+      disableButtons();
+    });
+    
+    // Initialize the DHT
+    let dht;
+    async function initializeDHT() {
+      try {
+        // Create a new DHT node
+        // Add a random delay to prevent both peers trying to connect simultaneously
+        // This helps avoid race conditions in WebRTC signaling
+        const initDelay = Math.floor(Math.random() * 500);
+        log(`Initializing DHT with ${initDelay}ms delay to prevent racing...`);
+        await new Promise(resolve => setTimeout(resolve, initDelay));
+        
+        dht = new DHT();
+        log('Creating DHT node...');
+        
+        // Wait for the DHT to be ready
+        dht.on('ready', (nodeId) => {
+          log(`DHT node ready with ID: ${nodeId}`);
+          document.getElementById('nodeId').textContent = nodeId;
+          
+          // Register with the signaling server
+          socket.emit('register', nodeId);
+          enableButtons();
+          
+          // Set up DHT event handlers
+          setupDHTEvents();
+        });
+      } catch (error) {
+        log(`Error initializing DHT: ${error.message}`);
+      }
+    }
+    
+    function setupDHTEvents() {
+      // Handle DHT signal events
+      dht.on('signal', (signalData) => {
+        // When DHT generates signal data (for a new/unknown peer), we relay it through the signaling server
+        if (signalData.targetNodeId) {
+          log(`Sending signal to peer: ${signalData.targetNodeId.substring(0, 8)}...`);
+          log(`Signal type: ${signalData.signal.type || 'unknown'}`);
+          socket.emit('signal', {
+            targetNodeId: signalData.targetNodeId,
+            signal: signalData.signal
+          });
+        } else {
+          log(`Warning: DHT emitted signal event without targetNodeId: ${JSON.stringify(signalData).substring(0, 100)}...`);
+        }
+      });
+      
+      // Handle DHT peer connection events
+      dht.on('peer:connect', (peerId) => {
+        log(`*** CONNECTED TO PEER: ${peerId} ***`);
+        updatePeerList();
+        
+        // Test the connection by storing a known value
+        setTimeout(() => {
+          log(`Testing DHT with peer ${peerId.substring(0, 8)}...`);
+          try {
+            const testKey = `test-${Date.now()}`;
+            const testValue = `value-${Date.now()}`;
+            log(`Storing test key: ${testKey} = ${testValue}`);
+            
+            dht.put(testKey, testValue)
+              .then(result => {
+                log(`Test store result: ${result ? 'Success' : 'Failed'}`);
+                // Try to retrieve it right away
+                return dht.get(testKey);
+              })
+              .then(retrievedValue => {
+                log(`Test retrieve result: ${retrievedValue === testValue ? 'Success' : 'Failed'} (${retrievedValue})`);
+              })
+              .catch(err => {
+                log(`Test DHT error: ${err.message}`);
+              });
+          } catch (error) {
+            log(`Error testing DHT: ${error.message}`);
+          }
+        }, 2000);
+      });
+      
+      dht.on('peer:disconnect', (peerId) => {
+        log(`Disconnected from peer: ${peerId}`);
+        updatePeerList();
+      });
+      
+      dht.on('error', (error) => {
+        log(`DHT error: ${error.message}`);
+      });
+    }
+    
+    // Socket.io event handlers for signaling
+    socket.on('initiate-connection', (data) => {
+      // Handle both old format (string) and new format (object with initiator flag)
+      let targetNodeId;
+      let isInitiator = true; // Default for backward compatibility
+      
+      if (typeof data === 'string') {
+        targetNodeId = data;
+      } else {
+        targetNodeId = data.peerId;
+        isInitiator = data.initiator;
+      }
+      
+      log(`Received initiate-connection request for ${targetNodeId.substring(0, 8)}... (initiator=${isInitiator})`);
+      
+      try {
+        // CRITICAL: We need to destroy any existing peer connection first
+        if (dht.peers.has(targetNodeId)) {
+          log(`CLEANUP: Destroying existing peer connection to ${targetNodeId.substring(0, 8)}...`);
+          const existingPeer = dht.peers.get(targetNodeId);
+          existingPeer.destroy();
+          dht.peers.delete(targetNodeId);
+        }
+        
+        // Add a small delay to ensure cleanup is complete
+        setTimeout(() => {
+          try {
+            // Connect to the peer with the specified initiator flag
+            log(`Connecting to peer ${targetNodeId.substring(0, 8)}... as ${isInitiator ? 'initiator' : 'responder'}`);
+            
+            // Import SimplePeer directly from window global
+            const SimplePeer = window.SimplePeer;
+            if (!SimplePeer) {
+              throw new Error('SimplePeer not loaded. Add the script tag to the page.');
+            }
+            
+            // Create a raw WebRTC peer first so we have more control
+            const rtcPeer = new SimplePeer({
+              initiator: isInitiator,
+              trickle: true,
+              config: {
+                iceServers: [
+                  { urls: 'stun:stun.l.google.com:19302' },
+                  { urls: 'stun:stun1.l.google.com:19302' },
+                  { urls: 'stun:stun.stunprotocol.org:3478' },
+                ]
+              }
+            });
+            
+            // Create a custom peer wrapper
+            const customPeer = new WebDHT.Peer({
+              nodeId: dht.nodeId,
+              peerId: targetNodeId,
+              initiator: isInitiator,
+              _existingPeer: rtcPeer // Pass the existing peer directly
+            });
+            
+            // Manually add to DHT's peer map
+            dht.peers.set(targetNodeId, customPeer);
+            
+            // Manual event setup for signal forwarding
+            rtcPeer.on('signal', signalData => {
+              log(`Generated signal (${signalData.type || 'candidate'}) for ${targetNodeId.substring(0, 8)}...`);
+              // Forward directly to signaling server
+              socket.emit('signal', {
+                to: targetNodeId,
+                data: signalData
+              });
+            });
+            
+            // Set up connect event
+            rtcPeer.on('connect', () => {
+              log(`✅ DIRECT CONNECTION ESTABLISHED with ${targetNodeId.substring(0, 8)}!`);
+              customPeer.emit('connect', targetNodeId);
+              dht.emit('peer:connect', targetNodeId);
+              
+              // Run a test to verify everything works
+              testDHT();
+            });
+            
+            // Set up error handling
+            rtcPeer.on('error', err => {
+              log(`⚠️ WebRTC Error with ${targetNodeId.substring(0, 8)}: ${err.message}`);
+              customPeer.emit('error', err, targetNodeId);
+              dht.emit('peer:error', err, targetNodeId);
+            });
+            
+            // Set up data channel
+            rtcPeer.on('data', data => {
+              log(`Received data from ${targetNodeId.substring(0, 8)}: ${data.length} bytes`);
+              customPeer.emit('data', data);
+            });
+            
+            // Attach the raw peer to our custom peer
+            customPeer.peer = rtcPeer;
+            log(`Direct WebRTC peer created for ${targetNodeId.substring(0, 8)}...`);
+          } catch (innerError) {
+            log(`⚠️ Error in connection setup: ${innerError.message}`);
+            console.error(innerError);
+          }
+        }, 500); // Half-second delay for cleanup
+    });
+    
+    socket.on('peers-list', (peersList) => {
+      log(`Received list of ${peersList.length} peers`);
+      // Automatically connect to all peers in the list
+      if (peersList && Array.isArray(peersList)) {
+        peersList.forEach(peerId => {
+          if (peerId !== dht.nodeIdHex) {
+            // Connect with a slight delay to stagger connections
+            setTimeout(() => {
+              try {
+                log(`Auto-connecting to peer: ${peerId.substring(0, 8)}...`);
+                socket.emit('connect-to-peer', peerId);
+              } catch (err) {
+                log(`Error auto-connecting to peer: ${err.message}`);
+              }
+            }, Math.random() * 1000);
+          }
+        });
+      }
+      updatePeerList();
+    });
+    
+    // Add a test DHT function to verify connections
+    function testDHT() {
+      try {
+        // Create a test key-value pair
+        const testKey = `test-${Date.now()}`;
+        const testValue = `value-${Date.now()}`;
+        
+        log(`Testing DHT with key=${testKey}, value=${testValue}`);
+        
+        // Store the value
+        dht.put(testKey, testValue)
+          .then(success => {
+            log(`Test PUT result: ${success}`);
+            
+            // Try to retrieve the value
+            return dht.get(testKey);
+          })
+          .then(retrieved => {
+            if (retrieved === testValue) {
+              log(`✅ TEST SUCCESSFUL! Retrieved value matches: ${retrieved}`);
+            } else {
+              log(`❌ TEST FAILED! Retrieved value mismatch: ${retrieved}`);
+            }
+          })
+          .catch(err => {
+            log(`❌ TEST ERROR: ${err.message}`);
+          });
+      } catch (err) {
+        log(`Error in DHT test: ${err.message}`);
+      }
+    }
+    
+    // UI functions
+    function enableButtons() {
+      document.getElementById('storeBtn').disabled = false;
+      document.getElementById('retrieveBtn').disabled = false;
+      document.getElementById('connectBtn').disabled = false;
+    }
+    
+    function disableButtons() {
+      document.getElementById('storeBtn').disabled = true;
+      document.getElementById('retrieveBtn').disabled = true;
+      document.getElementById('connectBtn').disabled = true;
+    }
+    
+    function updatePeerList() {
+      const peerListElement = document.getElementById('peerList');
+      
+      if (!dht || !dht.peers || Object.keys(dht.peers).length === 0) {
+        peerListElement.innerHTML = '<li>No peers connected</li>';
+        return;
+      }
+      
+      peerListElement.innerHTML = '';
+      Object.keys(dht.peers).forEach(peerId => {
+        const listItem = document.createElement('li');
+        listItem.textContent = `${peerId.substring(0, 16)}...`;
+        listItem.title = peerId;
+        peerListElement.appendChild(listItem);
+      });
+    }
+    
+    // Button event handlers
+    document.getElementById('storeBtn').addEventListener('click', async () => {
+      const key = document.getElementById('storeKey').value.trim();
+      const value = document.getElementById('storeValue').value.trim();
+      
+      if (!key || !value) {
+        log('Please enter both key and value');
+        return;
+      }
+      
+      try {
+        log(`Storing key: ${key}, value: ${value}`);
+        const result = await dht.put(key, value);
+        log(`Store result: ${result ? 'Success' : 'Failed'}`);
+      } catch (error) {
+        log(`Store error: ${error.message}`);
+      }
+    });
+    
+    document.getElementById('retrieveBtn').addEventListener('click', async () => {
+      const key = document.getElementById('retrieveKey').value.trim();
+      
+      if (!key) {
+        log('Please enter a key to retrieve');
+        return;
+      }
+      
+      try {
+        log(`Retrieving key: ${key}`);
+        const value = await dht.get(key);
+        log(`Retrieved value: ${value}`);
+        document.getElementById('retrieveResult').textContent = value || 'Not found';
+      } catch (error) {
+        log(`Retrieve error: ${error.message}`);
+        document.getElementById('retrieveResult').textContent = 'Error: ' + error.message;
+      }
+    });
+    
+    document.getElementById('connectBtn').addEventListener('click', () => {
+      const signalDataText = document.getElementById('signalData').value.trim();
+      
+      if (!signalDataText) {
+        log('Please enter signal data');
+        return;
+      }
+      
+      try {
+        const signalData = JSON.parse(signalDataText);
+        log('Connecting to peer with provided signal data');
+        dht.signal(signalData);
+      } catch (error) {
+        log(`Error parsing signal data: ${error.message}`);
+      }
+    });
+  </script>
+</body>
+</html>
