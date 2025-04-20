@@ -1,156 +1,228 @@
-/**
- * Node.js example for WebDHT
- * 
- * This example shows how to use WebDHT in a Node.js environment.
- * Run multiple instances of this file to create a network of nodes.
- */
-
-// Use the local import path for WebDHT
 import WebDHT from '../src/index.js';
-// Use Node.js built-in readline module
+import WebSocket from 'ws';
 import readline from 'readline';
 
-// Create readline interface for user input
+let signalingSocket = null;
+let dht = null;
+
+// CLI setup
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout
 });
 
-// Create a new DHT node with a random ID
-const dht = new WebDHT();
-
-// Display welcome message
-console.log('WebDHT Node.js Example');
-console.log('-----------------------');
-
-// Wait for DHT to be ready
-dht.on('ready', (nodeId) => {
-  console.log('Node ID:', nodeId);
-  console.log('');
-  console.log('Available commands:');
-  console.log('  signal <peerInfo>   - Connect to a peer using signal data');
-  console.log('  put <key> <value>   - Store a value in the DHT');
-  console.log('  get <key>           - Retrieve a value from the DHT');
-  console.log('  peers               - List connected peers');
-  console.log('  exit                - Exit the application');
-  console.log('');
-  
-  // Start the prompt once DHT is ready
-  promptUser();
-});
-
-// Handle signal events
-dht.on('signal', peerSignal => {
-  console.log('\nSignal data generated for peer:', peerSignal.id.substr(0, 8) + '...');
-  console.log('Share this with the peer to establish a connection:');
-  console.log(JSON.stringify(peerSignal));
-  promptUser();
-});
-
-// Handle peer connections
-dht.on('peer:connect', peerId => {
-  console.log('\nConnected to peer:', peerId.substr(0, 16) + '...');
-  promptUser();
-});
-
-// Handle peer disconnections
-dht.on('peer:disconnect', peerId => {
-  console.log('\nDisconnected from peer:', peerId.substr(0, 16) + '...');
-  promptUser();
-});
-
-// Handle peer errors
-dht.on('peer:error', ({ peer, error }) => {
-  console.log('\nError with peer:', peer.substr(0, 16) + '...', '-', error);
-  promptUser();
-});
-
-// Process user input
-function processCommand(input) {
-  const parts = input.trim().split(' ');
-  const command = parts[0].toLowerCase();
-  
-  switch (command) {
-    case 'signal':
-      try {
-        const peerInfo = JSON.parse(parts.slice(1).join(' '));
-        console.log('Connecting to peer:', peerInfo.id.substr(0, 8) + '...');
-        dht.signal(peerInfo);
-      } catch (err) {
-        console.log('Invalid peer info:', err.message);
-      }
-      break;
-      
-    case 'put':
-      if (parts.length < 3) {
-        console.log('Usage: put <key> <value>');
-        break;
-      }
-      
-      const key = parts[1];
-      const value = parts.slice(2).join(' ');
-      
-      console.log('Storing value...');
-      dht.put(key, value)
-        .then(success => {
-          console.log(success ? 
-            'Value stored successfully for key: ' + key : 
-            'Failed to store value for key: ' + key);
-        })
-        .catch(err => {
-          console.log('Error:', err.message);
-        });
-      break;
-      
-    case 'get':
-      if (parts.length < 2) {
-        console.log('Usage: get <key>');
-        break;
-      }
-      
-      const getKey = parts[1];
-      
-      console.log('Retrieving value...');
-      dht.get(getKey)
-        .then(value => {
-          console.log(value !== null ? 
-            'Retrieved value: ' + value : 
-            'Value not found for key: ' + getKey);
-        })
-        .catch(err => {
-          console.log('Error:', err.message);
-        });
-      break;
-      
-    case 'peers':
-      console.log('\nConnected Peers:');
-      if (dht.peers.size === 0) {
-        console.log('No connected peers');
-      } else {
-        dht.peers.forEach((peer, peerId) => {
-          console.log(`- ${peerId.substr(0, 32)}... (${peer.connected ? 'connected' : 'disconnected'})`);
-        });
-      }
-      break;
-      
-    case 'exit':
-      console.log('Closing DHT and exiting...');
-      dht.close();
-      rl.close();
-      process.exit(0);
-      break;
-      
-    default:
-      console.log('Unknown command:', command);
-      console.log('Available commands: signal, put, get, peers, exit');
-  }
-  
-  promptUser();
+function printCommands() {
+  console.log(`
+==============================
+  WebDHT Node CLI Commands
+==============================
+connect <peerId>   - Connect to a peer
+put <key> <value>  - Store a value in DHT
+get <key>          - Retrieve a value from DHT
+peers              - List connected peers
+exit               - Quit the app
+==============================
+`);
 }
 
-// Prompt for user input
-function promptUser() {
-  rl.question('\n> ', processCommand);
+// Initialize DHT
+async function init() {
+  dht = new WebDHT();
+
+  dht.on('ready', (nodeId) => {
+    console.log(`🟢 DHT ready. Your peer ID: ${nodeId}`);
+    printCommands();
+    connectToSignalingServer(dht, nodeId);
+    setupDHTEventListeners(dht);
+    promptCLI();
+  });
+
+  dht.on('error', (err) => {
+    console.error('❌ DHT Error:', err);
+  });
 }
 
-// Prompt will be started when DHT is ready
+// Connect to signaling server
+function connectToSignalingServer(dht, nodeId) {
+  signalingSocket = new WebSocket('ws://localhost:3000');
+
+  signalingSocket.on('open', () => {
+    console.log('🔌 Connected to signaling server');
+    signalingSocket.send(JSON.stringify({
+      type: 'register',
+      peerId: nodeId
+    }));
+  });
+
+  signalingSocket.on('message', (message) => {
+    try {
+      const data = JSON.parse(message.toString());
+
+      if (data.type === 'registered') {
+        console.log(`🆔 Registered as ${data.peerId}`);
+        if (data.peers.length) {
+          console.log(`🌐 Available peers: ${data.peers.join(', ')}`);
+        } else {
+          console.log('🌐 No other peers available yet.');
+        }
+      }
+
+      if (data.type === 'new_peer') {
+        console.log(`➕ New peer joined: ${data.peerId}`);
+      }
+
+      if (data.type === 'peer_left') {
+        console.log(`➖ Peer left: ${data.peerId}`);
+      }
+
+      if (data.type === 'signal' && data.peerId && data.signal) {
+        console.log(`📩 Signal received from ${data.peerId}`);
+
+        const peer = dht.signal({ id: data.peerId, signal: data.signal });
+
+        if (peer && typeof peer.on === 'function') {
+          attachPeerEvents(peer, data.peerId);
+        }
+      }
+
+      if (data.type === 'error') {
+        console.error(`❌ Server error: ${data.message}`);
+      }
+    } catch (err) {
+      console.error('❌ Failed to process server message:', err);
+    }
+  });
+
+  signalingSocket.on('error', (err) => {
+    console.error('❌ WebSocket error:', err);
+  });
+
+  signalingSocket.on('close', () => {
+    console.log('⚠️ Disconnected from signaling server');
+  });
+
+  // DHT to signaling server: outgoing signals
+  dht.on('signal', (data) => {
+    if (signalingSocket?.readyState === WebSocket.OPEN) {
+      if (data && data.id && data.signal) {
+        console.log(`📤 Sending signal to ${data.id}`);
+        signalingSocket.send(JSON.stringify({
+          type: 'signal',
+          target: data.id,
+          signal: data.signal
+        }));
+      }
+    }
+  });
+}
+
+// Attach peer events (used for both connect and signal)
+function attachPeerEvents(peer, peerId) {
+  peer.on('connect', () => {
+    console.log(`🟢 Connected to ${peerId}`);
+    peer.send(`Hello from ${dht.nodeId}`);
+  });
+
+  peer.on('data', (data) => {
+    console.log(`📨 Message from ${peerId}:`, data.toString());
+  });
+
+  peer.on('error', (err) => {
+    console.error(`❌ Peer ${peerId} error:`, err);
+  });
+
+  peer.on('close', () => {
+    console.log(`🔌 Peer ${peerId} connection closed.`);
+  });
+}
+
+// DHT-level peer tracking
+function setupDHTEventListeners(dht) {
+  dht.on('peer:connect', (peerId) => {
+    console.log(`✅ DHT reports connected to peer: ${peerId}`);
+  });
+
+  dht.on('peer:disconnect', (peerId) => {
+    console.log(`❌ DHT reports disconnected from peer: ${peerId}`);
+  });
+
+  dht.on('peer:error', (peerId, err) => {
+    console.error(`❌ DHT error with peer ${peerId}:`, err);
+  });
+}
+
+// CLI REPL
+function promptCLI() {
+  rl.question('> ', async (input) => {
+    const args = input.trim().split(/\s+/);
+    const cmd = args[0];
+
+    switch (cmd) {
+      case 'connect':
+        if (!args[1]) {
+          console.log('Usage: connect <peerId>');
+        } else {
+          try {
+            const peerId = args[1];
+            console.log(`📞 Connecting to ${peerId}...`);
+            const peer = await dht.connect({ id: peerId });
+            attachPeerEvents(peer, peerId);
+          } catch (err) {
+            console.error(`❌ Connection to ${args[1]} failed:`, err.message);
+          }
+        }
+        break;
+
+      case 'put':
+        if (args.length < 3) {
+          console.log('Usage: put <key> <value>');
+        } else {
+          try {
+            await dht.put(args[1], args.slice(2).join(' '));
+            console.log('📝 Value stored successfully.');
+          } catch (err) {
+            console.error('❌ Failed to store value:', err);
+          }
+        }
+        break;
+
+      case 'get':
+        if (!args[1]) {
+          console.log('Usage: get <key>');
+        } else {
+          try {
+            const value = await dht.get(args[1]);
+            console.log('📦 Retrieved value:', value);
+          } catch (err) {
+            console.error('❌ Failed to retrieve value:', err);
+          }
+        }
+        break;
+
+      case 'peers':
+        const peers = Array.from(dht.peers.values());
+        if (peers.length === 0) {
+          console.log('No connected peers');
+        } else {
+          for (const p of peers) {
+            console.log(`- ${p.peerId} (${p.connected ? 'connected' : 'disconnected'})`);
+          }
+        }
+        break;
+
+      case 'exit':
+        rl.close();
+        signalingSocket?.close();
+        process.exit(0);
+        break;
+
+      default:
+        console.log(`Unknown command: ${cmd}`);
+        printCommands();
+    }
+
+    promptCLI();
+  });
+}
+
+init();

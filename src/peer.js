@@ -23,48 +23,52 @@ class Peer extends EventEmitter {
     this.connected = false;
     this.destroyed = false;
     this.initialized = false;
-    
-    // Store options for later initialization
+
+    // Store base options (wrtc will be added later if needed)
     this.options = {
       initiator: options.initiator || false,
-      trickle: options.trickle !== false, // Default to true
+      trickle: options.trickle !== false,
       config: {
         iceServers: options.iceServers || [
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:global.stun.twilio.com:3478' }
         ]
-      }
+      },
+      wrtc: options.wrtc // might be undefined
     };
-    
-    // Initialize the peer (async)
-    this._initialize();
-    
-    // Handle incoming signals (queue them until initialized)
+
     this.signalQueue = [];
     if (options.signal) {
       this.signalQueue.push(options.signal);
     }
+
+    // Initialize asynchronously
+    this._initialize();
   }
-  
+
   /**
    * Initialize the peer connection (async)
    * @private
    */
   async _initialize() {
     try {
-      // Get the SimplePeer constructor
-      const SimplePeer = await getSimplePeer();
-      
-      // Create the peer instance
-      this.peer = new SimplePeer(this.options);
-      
-      // Setup event listeners
+      if (ENV.NODE && !this.options.wrtc) {
+        try {
+          const wrtcModule = await import('@koush/wrtc');
+          this.options.wrtc = wrtcModule.default;
+        } catch (wrtcErr) {
+          console.warn('Failed to import wrtc in Node:', wrtcErr.message);
+        }
+      }
+
+      const createPeer = await getSimplePeer();
+      this.peer = typeof createPeer === 'function' && createPeer.prototype && createPeer.prototype._isSimplePeer
+        ? new createPeer(this.options)
+        : new createPeer(this.options);
+
       this._setupListeners();
-      
-      // Mark as initialized
       this.initialized = true;
-      
-      // Process any queued signals
+
       while (this.signalQueue.length > 0) {
         const signal = this.signalQueue.shift();
         this.signal(signal);
@@ -74,7 +78,7 @@ class Peer extends EventEmitter {
       this.emit('error', err, this.peerIdHex);
     }
   }
-  
+
   /**
    * Setup event listeners for the peer
    * @private
@@ -83,61 +87,59 @@ class Peer extends EventEmitter {
     this.peer.on('signal', data => {
       this.emit('signal', data, this.peerIdHex);
     });
-    
+
     this.peer.on('connect', () => {
       this.connected = true;
       this.emit('connect', this.peerIdHex);
     });
-    
+
     this.peer.on('data', data => {
       this.emit('data', data, this.peerIdHex);
-      
       try {
         const message = JSON.parse(data.toString());
         this.emit('message', message, this.peerIdHex);
-      } catch (err) {
-        // Not a JSON message, ignore
+      } catch {
+        // Non-JSON data; ignore
       }
     });
-    
+
     this.peer.on('close', () => {
       this.connected = false;
       this.emit('close', this.peerIdHex);
       this.destroy();
     });
-    
+
     this.peer.on('error', err => {
       this.emit('error', err, this.peerIdHex);
     });
   }
-  
+
   /**
    * Signal the peer
    * @param {Object} data - Signal data
    */
   signal(data) {
     if (this.destroyed) return;
-    
-    // If not initialized yet, queue the signal
+
     if (!this.initialized || !this.peer) {
       this.signalQueue.push(data);
       return;
     }
-    
+
     this.peer.signal(data);
   }
-  
+
   /**
    * Send data to the peer
    * @param {Object|Buffer|string} data - Data to send
    */
   send(data) {
     if (!this.connected || this.destroyed || !this.initialized || !this.peer) return false;
-    
+
     if (typeof data === 'object' && !(data instanceof Uint8Array)) {
       data = JSON.stringify(data);
     }
-    
+
     try {
       this.peer.send(data);
       return true;
@@ -146,7 +148,7 @@ class Peer extends EventEmitter {
       return false;
     }
   }
-  
+
   /**
    * Destroy the peer connection
    */
