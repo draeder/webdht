@@ -855,12 +855,78 @@ class DHT extends EventEmitter {
     if (this.storage.size === 0) return;
     
     for (const [key, value] of this.storage.entries()) {
-      // Update timestamp
+      // Record that we have republished this key
       this.storageTimestamps.set(key, Date.now());
       
       // Re-store value
       await this.put(key, value);
     }
+  }
+  
+  /**
+   * Store a value directly to a specific peer
+   * @param {string} peerId - ID of the peer to store to
+   * @param {string} key - Key to store
+   * @param {*} value - Value to store
+   * @param {number} timeout - Timeout in milliseconds
+   * @returns {Promise<boolean>} Success status
+   */
+  async putToPeer(peerId, key, value, timeout = 5000) {
+    // Get the peer connection
+    const peer = this.peers.get(peerId);
+    if (!peer || !peer.connected) {
+      console.log(`Cannot store to peer ${peerId.substr(0, 8)}: not connected`);
+      return false;
+    }
+    
+    // Hash the key if not already a hash
+    const keyStr = typeof key === 'string' ? key : key.toString();
+    const keyHash = await sha1(keyStr);
+    const keyHashHex = bufferToHex(keyHash);
+    
+    // Store locally too
+    this.storage.set(keyHashHex, value);
+    this.storageTimestamps.set(keyHashHex, Date.now());
+    
+    // Create a promise that will resolve on response or timeout
+    return new Promise(resolve => {
+      let resolved = false;
+      const timeoutId = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          console.log(`Timeout storing to peer ${peerId.substr(0, 8)}`);
+          resolve(false);
+        }
+      }, timeout);
+      
+      // Create one-time response handler
+      const responseHandler = (message, sender) => {
+        if (sender !== peerId || 
+            message.type !== 'STORE_RESPONSE' || 
+            message.key !== keyHashHex) {
+          return;
+        }
+        
+        clearTimeout(timeoutId);
+        peer.removeListener('message', responseHandler);
+        resolved = true;
+        
+        const success = message.success === true;
+        console.log(`Store response from ${peerId.substr(0, 8)}: ${success ? 'success' : 'failure'}`);
+        resolve(success);
+      };
+      
+      // Send store request
+      peer.on('message', responseHandler);
+      peer.send({
+        type: 'STORE',
+        sender: this.nodeIdHex,
+        key: keyHashHex,
+        value: value
+      });
+      
+      console.log(`Store request sent to peer ${peerId.substr(0, 8)}`);
+    });
   }
   
   /**

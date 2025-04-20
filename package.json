@@ -8,12 +8,21 @@
     "start": "node example/server.js",
     "test": "echo \"No tests yet\""
   },
-  "keywords": ["dht", "kademlia", "webrtc", "simple-peer", "browser", "node"],
+  "keywords": [
+    "dht",
+    "kademlia",
+    "webrtc",
+    "simple-peer",
+    "browser",
+    "node"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@koush/wrtc": "^0.5.3",
     "express": "^4.18.2",
     "simple-peer": "^9.11.1"
+  },
+  "devDependencies": {
+    "@koush/wrtc": "^0.5.3"
   }
 }

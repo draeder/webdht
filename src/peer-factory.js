@@ -17,40 +17,97 @@ export async function getSimplePeer() {
   if (ENV.NODE) {
     // Node.js environment
     try {
-      const simplePeerModule = await import('simple-peer');
-      SimplePeer = simplePeerModule.default;
+      // First import SimplePeer
+      let simplePeerModule;
+      try {
+        simplePeerModule = await import('simple-peer');
+        SimplePeer = simplePeerModule.default || simplePeerModule;
+      } catch (spErr) {
+        console.error('Failed to import simple-peer:', spErr.message);
+        throw new Error('Could not load SimplePeer module in Node.js');
+      }
       
       // Try to load wrtc for Node.js
       try {
-        const wrtcModule = await import('@koush/wrtc');
-        const wrtc = wrtcModule.default;
+        // Dynamic import wrtc
+        const wrtc = await import('@koush/wrtc');
+        const wrtcImpl = wrtc.default || wrtc;
+        
+        console.log('Successfully loaded @koush/wrtc module for Node.js WebRTC support');
         
         // Return a wrapped constructor that includes wrtc by default
-        return function NodeSimplePeer(options = {}) {
-          return new SimplePeer({
-            wrtc,
+        SimplePeer = function(options) {
+          return new (simplePeerModule.default || simplePeerModule)({
+            wrtc: wrtcImpl,
             ...options
           });
         };
-      } catch (wrtcErr) {
-        console.warn('Failed to import @koush/wrtc:', wrtcErr.message);
+        
         return SimplePeer;
+      } catch (wrtcErr) {
+        console.warn('wrtc not available, SimplePeer will use default WebRTC implementation:', wrtcErr.message);
+        // Fallback to CommonJS require for wrtc
+        try {
+          // Try using require as a fallback
+          const wrtcRequire = require('@koush/wrtc');
+          console.log('Successfully loaded wrtc using require()'); 
+          
+          SimplePeer = function(options) {
+            return new (simplePeerModule.default || simplePeerModule)({
+              wrtc: wrtcRequire,
+              ...options
+            });
+          };
+          
+          return SimplePeer;
+        } catch (reqErr) {
+          console.warn('Failed to load wrtc with require():', reqErr.message);
+          return SimplePeer;
+        }
       }
     } catch (err) {
-      console.error('Failed to import simple-peer:', err.message);
-      throw err;
+      console.error('Failed to set up SimplePeer with WebRTC in Node.js:', err.message);
+      throw new Error('Could not set up WebRTC environment');
     }
   } else {
-    // Browser environment
-    // In the browser, we expect simple-peer to be available globally
-    // or via the import map in the HTML
-    try {
-      // Try to load from window if available (for script tag inclusion)
-      if (typeof window !== 'undefined' && window.SimplePeer) {
-        SimplePeer = window.SimplePeer;
+    // Browser environment - first check if SimplePeer is on window (from CDN)
+    if (typeof window !== 'undefined' && window.SimplePeer) {
+      SimplePeer = window.SimplePeer;
+      return SimplePeer;
+    }
+    
+    // If not on window, try to load from CDN
+    if (typeof window !== 'undefined') {
+      try {
+        console.log('Loading SimplePeer from CDN...');
+        // Create a script tag to load SimplePeer from CDN
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/simple-peer@latest/simplepeer.min.js';
+        script.async = true;
+        
+        // Wait for script to load
+        const loaded = new Promise((resolve, reject) => {
+          script.onload = () => {
+            if (window.SimplePeer) {
+              resolve(window.SimplePeer);
+            } else {
+              reject(new Error('SimplePeer not found after CDN load'));
+            }
+          };
+          script.onerror = (err) => reject(new Error(`Failed to load SimplePeer CDN: ${err.message}`));
+        });
+        
+        document.head.appendChild(script);
+        SimplePeer = await loaded;
         return SimplePeer;
+      } catch (cdnErr) {
+        console.error('Failed to load SimplePeer from CDN:', cdnErr.message);
       }
-      
+    }
+    
+    // Fallback to trying dynamic import (though this would require bundling)
+    try {
+      console.warn('Falling back to dynamic import of SimplePeer in browser');
       // Try to load using dynamic import
       const simplePeerModule = await import('simple-peer');
       SimplePeer = simplePeerModule.default || simplePeerModule;
