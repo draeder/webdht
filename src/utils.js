@@ -42,6 +42,10 @@ function toBuffer(input) {
  * @return {string} XOR distance as hex string
  */
 function distance(id1, id2) {
+  if (!id1 || !id2) {
+    console.error('Invalid IDs provided for distance calculation');
+    return '';
+  }
   // Convert hex strings to numbers and calculate XOR
   const len = Math.min(id1.length, id2.length);
   let result = '';
