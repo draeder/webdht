@@ -19,9 +19,9 @@ function printCommands() {
 connect <peerId>   - Connect to a peer
 put <key> <value>  - Store a value in DHT
 get <key>          - Retrieve a value from DHT
+dump               - Dump DHT contents
 peers              - List connected peers
 exit               - Quit the app
-dump               - Show raw DHT storage
 ==============================
 `);
 }
@@ -201,26 +201,20 @@ function promptCLI() {
         break;
 
       case 'peers':
-        const peers = Array.from(dht.peers.values());
-        if (peers.length === 0) {
-          console.log('No connected peers');
-        } else {
-          for (const p of peers) {
-            console.log(`- ${p.peerId} (${p.connected ? 'connected' : 'disconnected'})`);
-          }
-        }
+        console.log('Connected peers:', [...dht.peers.keys()]);
+        break;
+
+      case 'dump':
+        console.log('DHT Storage Contents:');
+        dht.storage.forEach((value, key) => {
+          console.log(`Key: ${key} => Value: ${value}`);
+        });
         break;
 
       case 'exit':
         rl.close();
         signalingSocket?.close();
         process.exit(0);
-        break;
-      case 'dump':
-        console.log('Raw DHT storage:');
-        for (const [k, v] of dht.storage.entries()) {
-          console.log(`${k}:`, v);
-        }
         break;
 
       default:
