@@ -21,6 +21,7 @@ put <key> <value>  - Store a value in DHT
 get <key>          - Retrieve a value from DHT
 peers              - List connected peers
 exit               - Quit the app
+dump               - Show raw DHT storage
 ==============================
 `);
 }
@@ -214,6 +215,12 @@ function promptCLI() {
         rl.close();
         signalingSocket?.close();
         process.exit(0);
+        break;
+      case 'dump':
+        console.log('Raw DHT storage:');
+        for (const [k, v] of dht.storage.entries()) {
+          console.log(`${k}:`, v);
+        }
         break;
 
       default:

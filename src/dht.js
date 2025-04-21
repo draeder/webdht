@@ -459,7 +459,7 @@ class DHT extends EventEmitter {
    * @param {string} peerId - Sender peer ID
    * @private
    */
-  _handleStore(message, peerId) {
+  async _handleStore(message, peerId) {
     const peer = this.peers.get(peerId);
     if (!peer) return;
     // Add sender to routing table
@@ -468,11 +468,43 @@ class DHT extends EventEmitter {
       host: null,
       port: null
     });
-    // Always hash the incoming key for storage, unless already a 40-char hex string
-    const keyStr = message.key;
-    const keyHashHex = /^[a-fA-F0-9]{40}$/.test(keyStr) ? keyStr : bufferToHex(sha1(keyStr));
+    // Validate and hash the incoming key for storage
+    let keyStr = message.key;
+    console.debug('[DHT._handleStore] Received STORE with key:', keyStr, 'from peer:', peerId);
+    if (typeof keyStr !== "string" || !keyStr.trim() || keyStr === ":" || keyStr === "undefined" || keyStr === "null") {
+      // Invalid key, do not store
+      console.warn('[DHT._handleStore] Invalid key, not storing:', keyStr);
+      peer.send({
+        type: 'STORE_RESPONSE',
+        sender: this.nodeIdHex,
+        success: false,
+        key: keyStr
+      });
+      return;
+    }
+    let keyHashHex;
+    if (/^[a-fA-F0-9]{40}$/.test(keyStr)) {
+      keyHashHex = keyStr;
+    } else {
+      try {
+        const hash = await sha1(keyStr);
+        keyHashHex = bufferToHex(hash);
+        console.debug('[DHT._handleStore] sha1(keyStr):', hash);
+        console.debug('[DHT._handleStore] bufferToHex(sha1(keyStr)):', keyHashHex);
+      } catch (e) {
+        console.error('[DHT._handleStore] Error hashing key:', keyStr, e);
+        peer.send({
+          type: 'STORE_RESPONSE',
+          sender: this.nodeIdHex,
+          success: false,
+          key: keyStr
+        });
+        return;
+      }
+    }
     const value = message.value;
     // Store the key-value pair using the hashed key
+    console.debug('[DHT._handleStore] Storing value under keyHashHex:', keyHashHex, 'original key:', keyStr);
     this.storage.set(keyHashHex, value);
     this.storageTimestamps.set(keyHashHex, Date.now());
     // Limit storage size
@@ -634,71 +666,34 @@ class DHT extends EventEmitter {
    * @return {Promise<boolean>} Success flag
    */
   async put(key, value) {
-    // Convert key to string if needed
     const keyStr = typeof key === 'string' ? key : key.toString();
-    
-    // Hash the key to get target ID
-    const keyHash = sha1(keyStr);
+    const keyHash = await sha1(keyStr);
     const keyHashHex = bufferToHex(keyHash);
-    
-    // First, find nodes closest to the key
-    const nodes = await this.findNode(keyHash);
-    
+    console.debug('[DHT.put] key:', keyStr, 'keyHashHex:', keyHashHex);
+    const nodes = await this.findNode(keyHashHex);
     if (nodes.length === 0) {
-      // Store locally if no nodes found
       this.storage.set(keyHashHex, value);
       this.storageTimestamps.set(keyHashHex, Date.now());
       return true;
     }
-    
-    // Store on closest nodes
     const promises = nodes.map(async node => {
       const peer = this.peers.get(node.id);
-      
-      if (!peer || !peer.connected) {
-        return false;
-      }
-      
+      if (!peer || !peer.connected) return false;
       return new Promise(resolve => {
-        // Set timeout
-        const timeout = setTimeout(() => {
-          resolve(false);
-        }, 5000);
-        
-        // Create one-time response handler
+        const timeout = setTimeout(() => resolve(false), 5000);
         const responseHandler = (message, sender) => {
-          if (sender !== node.id || 
-              message.type !== 'STORE_RESPONSE' || 
-              message.key !== keyHashHex) {
-            return;
-          }
-          
-          // Remove handler and timeout
+          if (sender !== node.id || message.type !== 'STORE_RESPONSE' || message.key !== keyStr) return;
           clearTimeout(timeout);
           peer.removeListener('message', responseHandler);
-          
           resolve(message.success === true);
         };
-        
-        // Send store request
         peer.on('message', responseHandler);
-        peer.send({
-          type: 'STORE',
-          sender: this.nodeIdHex,
-          key: keyHashHex,
-          value: value
-        });
+        peer.send({ type: 'STORE', sender: this.nodeIdHex, key: keyStr, value });
       });
     });
-    
-    // Wait for all stores to complete
     const results = await Promise.all(promises);
-    
-    // Store locally as well
     this.storage.set(keyHashHex, value);
     this.storageTimestamps.set(keyHashHex, Date.now());
-    
-    // Consider successful if at least one node stored it
     return results.some(r => r === true);
   }
   
@@ -708,104 +703,58 @@ class DHT extends EventEmitter {
    * @return {Promise<*>} Retrieved value or null
    */
   async get(key) {
-  // Convert key to string if needed
-  const keyStr = typeof key === 'string' ? key : key.toString();
-
-  // Hash the key to get target ID
-  const keyHash = sha1(keyStr);
-  const keyHashHex = bufferToHex(keyHash);
-
-  // Check local storage first
-  if (this.storage.has(keyHashHex)) {
-    return this.storage.get(keyHashHex);
-  }
-
-  // Find nodes closest to the key
-  const nodes = await this.findNode(keyHash);
-
-  if (nodes.length === 0) {
-    return null;
-  }
-
-  // Track queried nodes
-  const queriedNodes = new Set();
-
-  // Use iterative parallel lookup
-  for (let i = 0; i < nodes.length; i += ALPHA) {
-    // Take up to ALPHA unqueried nodes
-    const nodesToQuery = [];
-    for (let j = 0; j < ALPHA && i + j < nodes.length; j++) {
-      const node = nodes[i + j];
-
-      if (!queriedNodes.has(node.id)) {
-        nodesToQuery.push(node);
-        queriedNodes.add(node.id);
-      }
+    const keyStr = typeof key === 'string' ? key : key.toString();
+    const keyHash = await sha1(keyStr);
+    const keyHashHex = bufferToHex(keyHash);
+    console.debug('[DHT.get] key:', keyStr, 'keyHashHex:', keyHashHex);
+    if (this.storage.has(keyHashHex)) {
+      return this.storage.get(keyHashHex);
     }
-
-    if (nodesToQuery.length === 0) break;
-
-    // Query selected nodes in parallel
-    const promises = nodesToQuery.map(async node => {
-      const peer = this.peers.get(node.id);
-
-      if (!peer || !peer.connected) {
-        return null;
+    const nodes = await this.findNode(keyHashHex);
+    if (nodes.length === 0) return null;
+    const queriedNodes = new Set();
+    for (let i = 0; i < nodes.length; i += ALPHA) {
+      const nodesToQuery = [];
+      for (let j = 0; j < ALPHA && i + j < nodes.length; j++) {
+        const node = nodes[i + j];
+        if (!queriedNodes.has(node.id)) {
+          nodesToQuery.push(node);
+          queriedNodes.add(node.id);
+        }
       }
-
-      return new Promise(resolve => {
-        // Set timeout
-        const timeout = setTimeout(() => {
-          resolve(null);
-        }, 5000);
-
-        // Create one-time response handler
-        const responseHandler = (message, sender) => {
-          if (sender !== node.id) {
-            return;
-          }
-
-          // Check if it's a value response
-          if (message.type === 'FIND_VALUE_RESPONSE' && 
-              message.key === keyHashHex) {
-            // Remove handler and timeout
-            clearTimeout(timeout);
-            peer.removeListener('message', responseHandler);
-
-            // Store value locally
-            this.storage.set(keyHashHex, message.value);
-            this.storageTimestamps.set(keyHashHex, Date.now());
-
-            resolve(message.value);
-            return;
-          }
-
-          resolve(null);
-        };
-
-        // Send query
-        peer.on('message', responseHandler);
-        peer.send({
-          type: 'FIND_VALUE',
-          sender: this.nodeIdHex,
-          key: keyHashHex
+      if (nodesToQuery.length === 0) break;
+      const promises = nodesToQuery.map(async node => {
+        const peer = this.peers.get(node.id);
+        if (!peer || !peer.connected) return null;
+        return new Promise(resolve => {
+          const timeout = setTimeout(() => resolve(null), 5000);
+          const responseHandler = (message, sender) => {
+            if (sender !== node.id) return;
+            if (message.type === 'FIND_VALUE_RESPONSE' && message.key === keyHashHex) {
+              clearTimeout(timeout);
+              peer.removeListener('message', responseHandler);
+              resolve(message.value);
+            } else if (message.type === 'FIND_NODE_RESPONSE' && message.nodes) {
+              clearTimeout(timeout);
+              peer.removeListener('message', responseHandler);
+              resolve(null);
+            }
+          };
+          peer.on('message', responseHandler);
+          peer.send({ type: 'FIND_VALUE', sender: this.nodeIdHex, key: keyStr });
         });
       });
-    });
-
-    // Wait for all queries to complete
-    const results = await Promise.all(promises);
-
-    // Return the first non-null result
-    for (const result of results) {
-      if (result !== null) {
-        return result;
+      const results = await Promise.all(promises);
+      for (const value of results) {
+        if (value !== null && value !== undefined) {
+          this.storage.set(keyHashHex, value);
+          this.storageTimestamps.set(keyHashHex, Date.now());
+          return value;
+        }
       }
     }
+    return null;
   }
-
-  return null;
-}
   
   /**
    * Replicate data to other nodes
