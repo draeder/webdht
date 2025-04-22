@@ -111,6 +111,7 @@ See the `example` directory for complete usage examples:
 - `node.js`: Node.js command-line interface example
 
 ### Running Examples
+> Note: both node and browser peer instances can connect to each other.
 
 #### Browser Example
 
@@ -124,6 +125,9 @@ node server.js
 #### Node.js Example
 
 ```bash
+# Start the example server
+node server.js
+# Then run the Node.js example
 node example/node.js
 ```
 
@@ -139,3 +143,18 @@ WebDHT implements a Kademlia-like Distributed Hash Table with the following comp
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Advanced Usage & Exports
+
+The default export is the DHT class (named `WebDHT` in examples for clarity). For advanced use cases, you can also import:
+
+- `Peer`: The peer connection wrapper
+- `utils`: Utility functions (e.g., buffer conversions)
+- `sha1`, `generateRandomId`: SHA1 hash and random ID generator
+- `bufferToHex`, `hexToBuffer`: Buffer/hex conversion helpers
+
+Example:
+
+```javascript
+import WebDHT, { Peer, utils, sha1, generateRandomId, bufferToHex, hexToBuffer } from 'webdht';
+```
