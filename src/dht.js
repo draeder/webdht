@@ -27,11 +27,18 @@ const REPUBLISH_INTERVAL = 86400000; // Republication interval (24 hours)
  * K-bucket implementation
  */
 class KBucket {
-  constructor(localNodeId) {
+  constructor(localNodeId, debug = false) { // Add debug flag
     this.localNodeId = localNodeId;
     this.nodes = [];
+    this.debug = debug; // Store debug flag
   }
-  
+
+  _logDebug(...args) { // Add debug logger method
+    if (this.debug) {
+      console.debug('[KBucket]', ...args);
+    }
+  }
+
   /**
    * Add a node to the bucket
    * @param {Object} node - Node to add
@@ -43,7 +50,7 @@ class KBucket {
     const localNodeIdHex = typeof this.localNodeId === 'string' ? this.localNodeId : bufferToHex(this.localNodeId);
     // Don't add ourselves
     if (nodeIdHex === localNodeIdHex) {
-      console.debug('[KBucket.add] Attempted to add self, skipping:', nodeIdHex);
+      this._logDebug('Attempted to add self, skipping:', nodeIdHex); // Use _logDebug
       return false;
     }
     // Check if node already exists
@@ -56,17 +63,17 @@ class KBucket {
       const existingNode = this.nodes[nodeIndex];
       this.nodes.splice(nodeIndex, 1);
       this.nodes.push(existingNode);
-      console.debug('[KBucket.add] Node already exists, moved to end:', nodeIdHex);
+      this._logDebug('Node already exists, moved to end:', nodeIdHex); // Use _logDebug
       return false;
     }
     // Add new node if bucket not full
     if (this.nodes.length < K) {
-      this.nodes.push({ ...node, id: nodeIdHex });
-      console.debug('[KBucket.add] Added node:', nodeIdHex);
+      this.nodes.push({ ...node, id: nodeIdHex }); // Store as hex string
+      this._logDebug('Added node:', nodeIdHex); // Use _logDebug
       return true;
     }
     // Bucket full, can't add
-    console.debug('[KBucket.add] Bucket full, could not add:', nodeIdHex);
+    this._logDebug('Bucket full, could not add:', nodeIdHex); // Use _logDebug
     return false;
   }
   /**
@@ -82,12 +89,12 @@ class KBucket {
     });
     if (nodeIndex >= 0) {
       this.nodes.splice(nodeIndex, 1);
-      console.debug('[KBucket.remove] Removed node:', nodeIdHex);
+      this._logDebug('Removed node:', nodeIdHex); // Use _logDebug
       return true;
     }
     return false;
   }
-  
+
   /**
    * Get closest nodes to the target ID
    * @param {Buffer} targetId - Target node ID
@@ -140,22 +147,26 @@ class DHT extends EventEmitter {
    */
   async _initialize(options) {
     try {
+      this.debug = !!options.debug; // Store debug option, default false
+      this._logDebug('Initializing DHT with options:', options); // Use _logDebug
+
       // Initialize node ID (always string-based with our simplified approach)
       this.nodeId = options.nodeId || await generateRandomID();
-      
+
       // We're already using hex strings, so no conversion needed
       this.nodeIdHex = this.nodeId;
-      
+
       // Initialize routing table (k-buckets)
-      this.buckets = Array(BUCKET_COUNT).fill().map(() => new KBucket(this.nodeId));
-      
+      // Pass the debug flag to KBucket constructor
+      this.buckets = Array(BUCKET_COUNT).fill().map(() => new KBucket(this.nodeId, this.debug));
+
       // Initialize storage
       this.storage = new Map();
       this.storageTimestamps = new Map();
-      
+
       // Initialize peer connections
       this.peers = new Map();
-      
+
       // Message handlers
       this.messageHandlers = {
         PING: this._handlePing.bind(this),
@@ -163,18 +174,18 @@ class DHT extends EventEmitter {
         FIND_VALUE: this._handleFindValue.bind(this),
         STORE: this._handleStore.bind(this)
       };
-      
+
       // Bootstrap if nodes provided
       if (options.bootstrap && Array.isArray(options.bootstrap) && options.bootstrap.length > 0) {
         this._bootstrap(options.bootstrap);
       }
-      
+
       // Setup maintenance intervals
       this._setupMaintenance();
-      
-      // Log node creation
+
+      // Log node creation (use console.log for important info)
       console.log(`DHT node created with ID: ${this.nodeIdHex}`);
-      
+
       // Emit ready event with the node ID
       this.emit('ready', this.nodeIdHex);
     } catch (error) {
@@ -182,7 +193,17 @@ class DHT extends EventEmitter {
       this.emit('error', error);
     }
   }
-  
+
+  /**
+   * Helper for conditional debug logging
+   * @private
+   */
+  _logDebug(...args) {
+    if (this.debug) {
+      console.debug(`[DHT ${this.nodeIdHex.substring(0, 4)}]`, ...args);
+    }
+  }
+
   /**
    * Setup periodic maintenance tasks
    * @private
@@ -480,7 +501,7 @@ class DHT extends EventEmitter {
     });
     // Validate and hash the incoming key for storage
     let keyStr = message.key;
-    console.debug('[DHT._handleStore] Received STORE with key:', keyStr, 'from peer:', peerId);
+    this._logDebug('Received STORE with key:', keyStr, 'from peer:', peerId); // Use _logDebug
     if (typeof keyStr !== "string" || !keyStr.trim() || keyStr === ":" || keyStr === "undefined" || keyStr === "null") {
       // Invalid key, do not store
       console.warn('[DHT._handleStore] Invalid key, not storing:', keyStr);
@@ -499,8 +520,8 @@ class DHT extends EventEmitter {
       try {
         const hash = await sha1(keyStr);
         keyHashHex = bufferToHex(hash);
-        console.debug('[DHT._handleStore] sha1(keyStr):', hash);
-        console.debug('[DHT._handleStore] bufferToHex(sha1(keyStr)):', keyHashHex);
+        this._logDebug('sha1(keyStr):', hash); // Use _logDebug
+        this._logDebug('bufferToHex(sha1(keyStr)):', keyHashHex); // Use _logDebug
       } catch (e) {
         console.error('[DHT._handleStore] Error hashing key:', keyStr, e);
         peer.send({
@@ -514,7 +535,7 @@ class DHT extends EventEmitter {
     }
     const value = message.value;
     // Store the key-value pair using the hashed key
-    console.debug('[DHT._handleStore] Storing value under keyHashHex:', keyHashHex, 'original key:', keyStr);
+    this._logDebug('Storing value under keyHashHex:', keyHashHex, 'original key:', keyStr); // Use _logDebug
     this.storage.set(keyHashHex, value);
     this.storageTimestamps.set(keyHashHex, Date.now());
     // Limit storage size
@@ -537,7 +558,7 @@ class DHT extends EventEmitter {
       type: 'STORE_RESPONSE',
       sender: this.nodeIdHex,
       success: true,
-      key: keyStr
+      key: keyStr // Send back original key for confirmation
     });
   }
   
@@ -669,205 +690,347 @@ class DHT extends EventEmitter {
     const keyStr = typeof key === 'string' ? key : key.toString();
     const keyHash = await sha1(keyStr);
     const keyHashHex = bufferToHex(keyHash);
-    console.debug('[DHT.put] key:', keyStr, 'keyHashHex:', keyHashHex);
+    this._logDebug('put - key:', keyStr, 'keyHashHex:', keyHashHex); // Use _logDebug
     // Always store locally as well (for redundancy)
     this.storage.set(keyHashHex, value);
     this.storageTimestamps.set(keyHashHex, Date.now());
     // Find K closest nodes to the key
     const nodes = await this.findNode(keyHashHex);
-    console.debug('[DHT.put] Closest nodes for key:', nodes.map(n => n.id));
+    this._logDebug('put - Closest nodes for key:', nodes.map(n => n.id)); // Use _logDebug
     if (nodes.length === 0) {
-      console.debug('[DHT.put] No nodes found, storing locally only.');
+      this._logDebug('put - No nodes found, storing locally only.'); // Use _logDebug
       return true;
     }
     // Send STORE to all K closest nodes
     const promises = nodes.map(async node => {
       const peer = this.peers.get(node.id);
       if (!peer || !peer.connected) {
-        console.debug('[DHT.put] Peer not connected:', node.id);
+        this._logDebug('put - Peer not connected:', node.id); // Use _logDebug
         return false;
       }
       return new Promise(resolve => {
         const timeout = setTimeout(() => {
-          console.debug('[DHT.put] STORE timeout for peer:', node.id);
+          this._logDebug('put - STORE timeout for peer:', node.id); // Use _logDebug
           resolve(false);
-        }, 5000);
+        }, 5000); // 5 second timeout for STORE
+
         const responseHandler = (message, sender) => {
-          if (sender !== node.id || message.type !== 'STORE_RESPONSE' || message.key !== keyStr) {
+          if (sender !== node.id ||
+              message.type !== 'STORE_RESPONSE' ||
+              message.key !== keyStr) { // Check original key in response
             return;
           }
           clearTimeout(timeout);
           peer.removeListener('message', responseHandler);
+          this._logDebug('put - STORE response from peer:', node.id, 'success:', message.success); // Use _logDebug
           resolve(message.success);
         };
+
         peer.on('message', responseHandler);
+        this._logDebug('put - Sending STORE to peer:', node.id, 'key:', keyStr); // Use _logDebug
         peer.send({
           type: 'STORE',
           sender: this.nodeIdHex,
-          key: keyStr,
+          key: keyStr, // Send original key
           value: value
         });
       });
     });
+
     const results = await Promise.all(promises);
-    return results.some(r => r);
+    const successCount = results.filter(Boolean).length;
+    this._logDebug('put - STORE operation completed. Success count:', successCount, 'out of', nodes.length); // Use _logDebug
+    return successCount > 0; // Consider successful if at least one node stored it
   }
 
-  // Add this method to immediately replicate to new peers responsible for the key
-  async _immediateReplicateToNewPeers(keyHashHex, value) {
-    // Find all connected peers not already in the closest nodes
-    const allPeerIds = Array.from(this.peers.keys());
-    const responsiblePeers = await this.findNode(keyHashHex);
-    const responsibleIds = new Set(responsiblePeers.map(n => n.id));
-    for (const peerId of allPeerIds) {
-      if (!responsibleIds.has(peerId)) continue;
-      const peer = this.peers.get(peerId);
-      if (!peer || !peer.connected) continue;
-      console.debug('[DHT._immediateReplicateToNewPeers] Replicating key', keyHashHex, 'to new peer', peerId);
-      peer.send({ type: 'STORE', sender: this.nodeIdHex, key: keyHashHex, value });
-    }
-  }
-  
   /**
-   * Retrieve a value from the DHT
+   * Get a value from the DHT
    * @param {string} key - Key to retrieve
-   * @return {Promise<*>} Value or null
+   * @return {Promise<*>} Value or null if not found
    */
   async get(key) {
     const keyStr = typeof key === 'string' ? key : key.toString();
     const keyHash = await sha1(keyStr);
     const keyHashHex = bufferToHex(keyHash);
-    console.debug('[DHT.get] key:', keyStr, 'keyHashHex:', keyHashHex);
+    this._logDebug('get - key:', keyStr, 'keyHashHex:', keyHashHex); // Use _logDebug
+
     // Check local storage first
     if (this.storage.has(keyHashHex)) {
+      this._logDebug('get - Found value locally'); // Use _logDebug
       return this.storage.get(keyHashHex);
     }
-    // Find K closest nodes to the key
-    const nodes = await this.findNode(keyHashHex);
-    console.debug('[DHT.get] Closest nodes for key:', nodes.map(n => n.id));
+
+    // Iterative lookup similar to findNode
+    let nodes = [];
+    for (let i = 0; i < BUCKET_COUNT; i++) {
+      nodes = nodes.concat(this.buckets[i].nodes);
+    }
+    // Ensure unique node IDs and only connected peers
+    const seen = new Set();
+    nodes = nodes.filter(n => {
+      const nIdHex = typeof n.id === 'string' ? n.id : bufferToHex(n.id);
+      if (seen.has(nIdHex)) return false;
+      seen.add(nIdHex);
+      if (nIdHex === this.nodeIdHex) return false;
+      const peer = this.peers.get(nIdHex);
+      return peer && peer.connected;
+    });
+
+    nodes = nodes
+      .sort((a, b) => {
+        const distA = distance(a.id, keyHash);
+        const distB = distance(b.id, keyHash);
+        return compareBuffers(distA, distB);
+      })
+      .slice(0, K);
+
     if (nodes.length === 0) {
-      console.debug('[DHT.get] No nodes found for key.');
+      this._logDebug('get - No connected peers to query.'); // Use _logDebug
       return null;
     }
-    // Query all K closest nodes for the value
-    let foundValue = null;
+
     const queriedNodes = new Set();
-    for (const node of nodes) {
-      const peer = this.peers.get(node.id);
-      if (!peer || !peer.connected) continue;
-      await new Promise(resolve => {
-        const timeout = setTimeout(() => {
-          peer.removeListener('message', responseHandler);
-          resolve();
-        }, 5000);
-        const responseHandler = (message, sender) => {
-          if (sender !== node.id) return;
-          if (message.type === 'FIND_VALUE_RESPONSE' && message.key === keyHashHex) {
+    let closestNodes = [...nodes];
+    let foundValue = null;
+    let nodesToQueryNext = [...nodes]; // Start with initial closest nodes
+
+    while (nodesToQueryNext.length > 0 && foundValue === null) {
+      const currentBatch = [];
+      for (let i = 0; i < nodesToQueryNext.length && currentBatch.length < ALPHA; i++) {
+        const node = nodesToQueryNext[i];
+        const nodeIdHex = typeof node.id === 'string' ? node.id : bufferToHex(node.id);
+        if (!queriedNodes.has(nodeIdHex)) {
+          currentBatch.push(node);
+          queriedNodes.add(nodeIdHex);
+        }
+      }
+
+      if (currentBatch.length === 0) break; // No new nodes to query in this round
+
+      this._logDebug('get - Querying batch:', currentBatch.map(n => (typeof n.id === 'string' ? n.id : bufferToHex(n.id)).substring(0, 4))); // Use _logDebug
+
+      const promises = currentBatch.map(async node => {
+        const nodeIdHex = typeof node.id === 'string' ? node.id : bufferToHex(node.id);
+        const peer = this.peers.get(nodeIdHex);
+        if (!peer || !peer.connected) {
+          return { nodes: [] }; // Return empty nodes if peer disconnected
+        }
+
+        return new Promise(resolve => {
+          const timeout = setTimeout(() => {
+            this._logDebug('get - FIND_VALUE timeout for peer:', nodeIdHex); // Use _logDebug
+            resolve({ nodes: [] }); // Resolve with empty nodes on timeout
+          }, 5000); // 5 second timeout
+
+          const responseHandler = (message, sender) => {
+            if (sender !== nodeIdHex ||
+                message.type !== 'FIND_VALUE_RESPONSE' ||
+                message.key !== keyHashHex) { // Check the hash key in response
+              return;
+            }
             clearTimeout(timeout);
             peer.removeListener('message', responseHandler);
-            foundValue = message.value;
-            resolve();
-          }
-        };
-        peer.on('message', responseHandler);
-        peer.send({
-          type: 'FIND_VALUE',
-          sender: this.nodeIdHex,
-          key: keyStr
+
+            if (message.value !== undefined) {
+              this._logDebug('get - Received VALUE from peer:', nodeIdHex); // Use _logDebug
+              resolve({ value: message.value, source: nodeIdHex });
+            } else if (message.nodes) {
+              this._logDebug('get - Received NODES from peer:', nodeIdHex, message.nodes.map(n => n.id.substring(0, 4))); // Use _logDebug
+              const responseNodes = message.nodes
+                .filter(n => n && n.id)
+                .map(n => ({
+                  id: hexToBuffer(n.id), // Keep as buffer internally for distance calc
+                  host: null,
+                  port: null
+                }));
+              resolve({ nodes: responseNodes });
+            } else {
+              resolve({ nodes: [] }); // Empty response if neither value nor nodes
+            }
+          };
+
+          peer.on('message', responseHandler);
+          this._logDebug('get - Sending FIND_VALUE to peer:', nodeIdHex, 'keyHash:', keyHashHex); // Use _logDebug
+          peer.send({
+            type: 'FIND_VALUE',
+            sender: this.nodeIdHex,
+            key: keyHashHex // Send the hash key
+          });
         });
       });
-      if (foundValue !== null && foundValue !== undefined) break;
-    }
-    if (foundValue !== null && foundValue !== undefined) {
-      // Optionally store the value locally for future queries (caching)
-      this.storage.set(keyHashHex, foundValue);
-      this.storageTimestamps.set(keyHashHex, Date.now());
-      return foundValue;
-    }
-    console.debug('[DHT.get] Value not found in network.');
-    return null;
+
+      const results = await Promise.all(promises);
+      let newPotentialNodes = [];
+
+      for (const result of results) {
+        if (result.value !== undefined) {
+          foundValue = result.value;
+          const sourcePeerId = result.source;
+          this._logDebug('get - Found value from peer:', sourcePeerId); // Use _logDebug
+
+          // Cache the value locally after finding it
+          this.storage.set(keyHashHex, foundValue);
+          this.storageTimestamps.set(keyHashHex, Date.now());
+          this._logDebug('get - Cached value locally.'); // Use _logDebug
+
+          // Optimization: Store the value on the closest node that *didn't* have it
+          const closestNodeWithoutValue = closestNodes
+            .find(n => (typeof n.id === 'string' ? n.id : bufferToHex(n.id)) !== sourcePeerId);
+
+          if (closestNodeWithoutValue) {
+            const nodeToStoreOnId = typeof closestNodeWithoutValue.id === 'string' ? closestNodeWithoutValue.id : bufferToHex(closestNodeWithoutValue.id);
+            const peerToStoreOn = this.peers.get(nodeToStoreOnId);
+            if (peerToStoreOn && peerToStoreOn.connected) {
+              this._logDebug('get - Caching value on closer peer:', nodeToStoreOnId.substring(0, 4)); // Use _logDebug
+              peerToStoreOn.send({
+                type: 'STORE',
+                sender: this.nodeIdHex,
+                key: keyStr, // Send original key for STORE
+                value: foundValue
+              });
+            }
+          }
+          break; // Exit loop once value is found
+        }
+        if (result.nodes) {
+          newPotentialNodes = newPotentialNodes.concat(result.nodes);
+        }
+      }
+
+      if (foundValue !== null) break; // Exit outer loop if value found
+
+      // Process new nodes found
+      const newlyDiscoveredNodes = [];
+      const seenNew = new Set(); // Track nodes added in this iteration
+      newPotentialNodes.forEach(node => {
+        const nodeIdHex = typeof node.id === 'string' ? node.id : bufferToHex(node.id);
+        // Add only if not self, not already seen/queried, and connected
+        if (nodeIdHex !== this.nodeIdHex && !queriedNodes.has(nodeIdHex) && !seen.has(nodeIdHex) && !seenNew.has(nodeIdHex)) {
+           const peer = this.peers.get(nodeIdHex);
+           if (peer && peer.connected) {
+             this._addNode(node); // Add to our routing table
+             newlyDiscoveredNodes.push(node);
+             seenNew.add(nodeIdHex);
+             seen.add(nodeIdHex); // Add to overall seen set
+           }
+        }
+      });
+
+      // Update closestNodes list and determine next nodes to query
+      closestNodes = [...closestNodes, ...newlyDiscoveredNodes]
+        .filter((n, i, arr) => { // Unique nodes
+          const nIdHex = typeof n.id === 'string' ? n.id : bufferToHex(n.id);
+          return arr.findIndex(x => (typeof x.id === 'string' ? x.id : bufferToHex(x.id)) === nIdHex) === i;
+        })
+        .sort((a, b) => { // Sort by distance to key
+          const distA = distance(a.id, keyHash);
+          const distB = distance(b.id, keyHash);
+          return compareBuffers(distA, distB);
+        })
+        .slice(0, K); // Keep only K closest
+
+      // Find nodes from the updated closest list that haven't been queried yet
+      nodesToQueryNext = closestNodes.filter(node => {
+        const nodeIdHex = typeof node.id === 'string' ? node.id : bufferToHex(node.id);
+        return !queriedNodes.has(nodeIdHex);
+      });
+
+      this._logDebug('get - Iteration complete. Closest nodes:', closestNodes.map(n=>(typeof n.id === 'string' ? n.id : bufferToHex(n.id)).substring(0,4)), 'Next to query:', nodesToQueryNext.map(n=>(typeof n.id === 'string' ? n.id : bufferToHex(n.id)).substring(0,4))); // Use _logDebug
+
+    } // End while loop
+
+    this._logDebug('get - Lookup finished. Value found:', foundValue !== null); // Use _logDebug
+    return foundValue;
   }
 
-  async dump() {
-    console.log('DHT Storage Dump:');
-    for (const [key, value] of this.storage.entries()) {
-      console.log(`Key: ${key}, Value: ${value}`);
-    }
-  }  
-  // Replicate relevant key-value pairs to a new peer if it is now among the K closest for any key
-  async _replicateToNewPeer(peerId) {
-    if (!peerId) return;
-    const peer = this.peers.get(peerId);
-    if (!peer || !peer.connected) return;
+  // ... existing code ...
+
+  /**
+   * Replicate data to K closest nodes for each key
+   * @private
+   */
+  _replicateData() {
+    this._logDebug('Starting data replication...'); // Use _logDebug
+    this.storage.forEach(async (value, keyHashHex) => {
+      const keyHash = hexToBuffer(keyHashHex);
+      const nodes = await this.findNode(keyHashHex); // Find current K closest
+      this._logDebug(`Replicating key ${keyHashHex.substring(0,4)} to ${nodes.length} nodes`); // Use _logDebug
+      nodes.forEach(node => {
+        const peer = this.peers.get(node.id);
+        if (peer && peer.connected && node.id !== this.nodeIdHex) { // Don't send to self
+          // We need the original key to send STORE, but we only have the hash.
+          // This is a limitation of simple replication without storing original keys.
+          // A better approach would involve storing { originalKey, value, timestamp }
+          // For now, we can't reliably replicate without the original key.
+          // console.warn(`Cannot replicate key ${keyHashHex} without original key.`);
+
+          // Alternative (if we decide to STORE using hash as key - less user friendly):
+          /*
+          this._logDebug(`Sending STORE (replication) for ${keyHashHex.substring(0,4)} to ${node.id.substring(0,4)}`);
+          peer.send({
+            type: 'STORE',
+            sender: this.nodeIdHex,
+            key: keyHashHex, // Send hash as key
+            value: value
+          });
+          */
+        }
+      });
+    });
+  }
+
+  /**
+   * Republish data originally stored by this node
+   * @private
+   */
+  _republishData() {
+    // This requires tracking which keys were originally published by this node.
+    // For simplicity, we'll republish everything this node currently holds.
+    this._logDebug('Starting data republication...'); // Use _logDebug
+    this.storage.forEach((value, keyHashHex) => {
+      // Again, we face the issue of not having the original key.
+      // We'd need to modify the `put` method to store the original key alongside the hash/value
+      // or store a flag indicating this node is the originator.
+      this._logDebug(`Attempting to republish key ${keyHashHex.substring(0,4)} (needs original key)`); // Use _logDebug
+      // Example if original key was stored:
+      // const originalKey = this.getOriginalKeyForHash(keyHashHex); // Hypothetical function
+      // if (originalKey) {
+      //   this.put(originalKey, value);
+      // }
+    });
+  }
+
+  /**
+   * Replicate relevant data to a newly connected peer
+   * @param {string} newPeerIdHex - The ID of the newly connected peer
+   * @private
+   */
+  async _replicateToNewPeer(newPeerIdHex) {
+    this._logDebug(`Checking replication needs for new peer: ${newPeerIdHex.substring(0,4)}`); // Use _logDebug
+    const newPeerIdBuffer = hexToBuffer(newPeerIdHex);
+
     for (const [keyHashHex, value] of this.storage.entries()) {
-      // For each stored key, check if any new peers are now among the K closest and replicate if needed
-      for (const [keyHashHex, value] of this.storage.entries()) {
-        const closestNodes = await this.findNode(keyHashHex);
-        const responsibleIds = new Set(closestNodes.map(n => n.id));
-        for (const peerId of responsibleIds) {
-          const peer = this.peers.get(peerId);
-          if (!peer || !peer.connected) continue;
-          // Only send if the peer doesn't already have the value (best effort, no ACK)
-          // Optionally, could keep a record of last sent, but for now, always send
-          console.debug('[DHT._replicateData] Replicating key', keyHashHex, 'to peer', peerId);
-          peer.send({ type: 'STORE', sender: this.nodeIdHex, key: keyHashHex, value });
+      const keyHashBuffer = hexToBuffer(keyHashHex);
+      const closestNodes = await this.findNode(keyHashHex); // Find K closest nodes *now*
+
+      // Check if the new peer is among the K closest for this key
+      const isNewPeerClosest = closestNodes.some(node => node.id === newPeerIdHex);
+
+      if (isNewPeerClosest) {
+        const peer = this.peers.get(newPeerIdHex);
+        if (peer && peer.connected) {
+          // Again, the limitation of not having the original key prevents direct STORE.
+          this._logDebug(`New peer ${newPeerIdHex.substring(0,4)} is close to key ${keyHashHex.substring(0,4)}, replication needed (requires original key).`); // Use _logDebug
+          // If original key was available:
+          // const originalKey = this.getOriginalKeyForHash(keyHashHex);
+          // if (originalKey) {
+          //   peer.send({ type: 'STORE', sender: this.nodeIdHex, key: originalKey, value: value });
+          // }
         }
       }
     }
-  }  
-  /**
-   * Replicate data to other nodes
-   * @private
-   */
-  async _replicateData() {
-    // For each stored key, check if any new peers are now among the K closest and replicate if needed
-    for (const [keyHashHex, value] of this.storage.entries()) {
-      const closestNodes = await this.findNode(keyHashHex);
-      const responsibleIds = new Set(closestNodes.map(n => n.id));
-      for (const peerId of responsibleIds) {
-        const peer = this.peers.get(peerId);
-        if (!peer || !peer.connected) continue;
-        // Only send if the peer doesn't already have the value (best effort, no ACK)
-        // Optionally, could keep a record of last sent, but for now, always send
-        console.debug('[DHT._replicateData] Replicating key', keyHashHex, 'to peer', peerId);
-        peer.send({ type: 'STORE', sender: this.nodeIdHex, key: keyHashHex, value });
-      }
-    }
   }
-  
-  /**
-   * Republish all stored data
-   * @private
-   */
-  async _republishData() {
-    // Skip if no data to republish
-    if (this.storage.size === 0) return;
-    
-    for (const [key, value] of this.storage.entries()) {
-      // Update timestamp
-      this.storageTimestamps.set(key, Date.now());
-      
-      // Re-store value
-      await this.put(key, value);
-    }
-  }
-  
-  /**
-   * Close the DHT and all connections
-   */
-  close() {
-    // Clear maintenance intervals
-    clearInterval(this.replicateInterval);
-    clearInterval(this.republishInterval);
-    
-    // Close all peer connections
-    for (const peer of this.peers.values()) {
-      peer.destroy();
-    }
-    
-    this.peers.clear();
-    this.emit('close');
-  }
+
 }
 
 export default DHT;
