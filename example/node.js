@@ -19,7 +19,6 @@ function printCommands() {
 connect <peerId>   - Connect to a peer
 put <key> <value>  - Store a value in DHT
 get <key>          - Retrieve a value from DHT
-dump               - Dump DHT contents
 peers              - List connected peers
 exit               - Quit the app
 ==============================
@@ -28,6 +27,7 @@ exit               - Quit the app
 
 // Initialize DHT
 async function init() {
+  autoconnectEnabled = process.argv.includes('--autoconnect');
   dht = new WebDHT();
 
   dht.on('ready', (nodeId) => {
@@ -138,7 +138,24 @@ function attachPeerEvents(peer, peerId) {
 }
 
 // DHT-level peer tracking
+let autoconnectEnabled = false;
+
 function setupDHTEventListeners(dht) {
+  // Add autoconnect logic for new peers
+  if (autoconnectEnabled) {
+    signalingSocket.on('message', (message) => {
+      try {
+        const data = JSON.parse(message.toString());
+        if (data.type === 'new_peer') {
+          console.log(`🔗 Auto-connecting to new peer: ${data.peerId}`);
+          dht.connect({ id: data.peerId }).catch(err => 
+            console.error(`Auto-connect failed: ${err.message}`));
+        }
+      } catch (err) {
+        // Error handling preserved from existing code
+      }
+    });
+  }
   dht.on('peer:connect', (peerId) => {
     console.log(`✅ DHT reports connected to peer: ${peerId}`);
   });
@@ -204,13 +221,6 @@ function promptCLI() {
         console.log('Connected peers:', [...dht.peers.keys()]);
         break;
 
-      case 'dump':
-        console.log('DHT Storage Contents:');
-        dht.storage.forEach((value, key) => {
-          console.log(`Key: ${key} => Value: ${value}`);
-        });
-        break;
-
       case 'exit':
         rl.close();
         signalingSocket?.close();
@@ -226,4 +236,8 @@ function promptCLI() {
   });
 }
 
+// Update usage display
+console.log(`
+Usage: node node.js [--autoconnect]
+`);
 init();

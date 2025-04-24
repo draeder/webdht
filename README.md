@@ -11,6 +11,31 @@ A Kademlia-like Distributed Hash Table (DHT) that works seamlessly in both brows
 - **Asynchronous API**: Modern Promise-based interface
 - **Event-based architecture**: Provides events for signal data, peer connections, etc.
 
+## Implementation Details
+
+WebDHT implements a Kademlia-like Distributed Hash Table with the following components:
+
+- **DHT**: The main DHT implementation with Kademlia routing logic
+- **Peer**: Wrapper around simple-peer for WebRTC connections
+- **K-Buckets**: Store routing information for Kademlia
+- **SHA1**: Custom SHA1 implementation that works in both environments
+
+
+## Advanced Usage & Exports
+
+The default export is the DHT class (named `WebDHT` in examples for clarity). For advanced use cases, you can also import:
+
+- `Peer`: The peer connection wrapper
+- `utils`: Utility functions (e.g., buffer conversions)
+- `sha1`, `generateRandomId`: SHA1 hash and random ID generator
+- `bufferToHex`, `hexToBuffer`: Buffer/hex conversion helpers
+
+Example:
+
+```javascript
+import WebDHT, { Peer, utils, sha1, generateRandomId, bufferToHex, hexToBuffer } from 'webdht';
+```
+
 ## Installation
 
 ```bash
@@ -72,13 +97,12 @@ dht.on('peer:connect', (peerId) => {
 });
 ```
 
-## API Reference
+# WebDHT API Reference
 
-### WebDHT Class
+## WebDHT Class
 
-#### Constructor
-
-```javascript
+### Constructor
+```js
 const dht = new WebDHT(options);
 ```
 
@@ -119,7 +143,7 @@ See the `example` directory for complete usage examples:
 # Start the example server
 node server.js
 
-# Then open http://localhost:3000 in your browser
+# Then open http://localhost:3000 in your browser in multiple tabs
 ```
 
 #### Node.js Example
@@ -129,32 +153,10 @@ node server.js
 node server.js
 # Then run the Node.js example
 node example/node.js
+## Auto-connect peers
+node example/node.js --autoconnect
 ```
-
-## Implementation Details
-
-WebDHT implements a Kademlia-like Distributed Hash Table with the following components:
-
-- **DHT**: The main DHT implementation with Kademlia routing logic
-- **Peer**: Wrapper around simple-peer for WebRTC connections
-- **K-Buckets**: Store routing information for Kademlia
-- **SHA1**: Custom SHA1 implementation that works in both environments
 
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Advanced Usage & Exports
-
-The default export is the DHT class (named `WebDHT` in examples for clarity). For advanced use cases, you can also import:
-
-- `Peer`: The peer connection wrapper
-- `utils`: Utility functions (e.g., buffer conversions)
-- `sha1`, `generateRandomId`: SHA1 hash and random ID generator
-- `bufferToHex`, `hexToBuffer`: Buffer/hex conversion helpers
-
-Example:
-
-```javascript
-import WebDHT, { Peer, utils, sha1, generateRandomId, bufferToHex, hexToBuffer } from 'webdht';
-```
