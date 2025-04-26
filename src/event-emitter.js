@@ -23,8 +23,8 @@ export default class EventEmitter {
    * @returns {EventEmitter} - Returns this for chaining
    */
   on(event, listener) {
-    if (typeof listener !== 'function') {
-      throw new TypeError('Listener must be a function');
+    if (typeof listener !== "function") {
+      throw new TypeError("Listener must be a function");
     }
 
     // Create array for event if it doesn't exist
@@ -34,7 +34,7 @@ export default class EventEmitter {
 
     // Add listener to event array
     this._events.get(event).push(listener);
-    
+
     return this;
   }
 
@@ -45,8 +45,8 @@ export default class EventEmitter {
    * @returns {EventEmitter} - Returns this for chaining
    */
   once(event, listener) {
-    if (typeof listener !== 'function') {
-      throw new TypeError('Listener must be a function');
+    if (typeof listener !== "function") {
+      throw new TypeError("Listener must be a function");
     }
 
     // Create wrapper that removes itself after execution
@@ -74,11 +74,14 @@ export default class EventEmitter {
     }
 
     const eventListeners = this._events.get(event);
-    
+
     // Filter out the matching listener
-    const filteredListeners = eventListeners.filter(registered => {
-      return registered !== listener && 
-             (!registered.originalListener || registered.originalListener !== listener);
+    const filteredListeners = eventListeners.filter((registered) => {
+      return (
+        registered !== listener &&
+        (!registered.originalListener ||
+          registered.originalListener !== listener)
+      );
     });
 
     if (filteredListeners.length === 0) {
@@ -101,7 +104,7 @@ export default class EventEmitter {
     } else {
       this._events.clear();
     }
-    
+
     return this;
   }
 
@@ -126,10 +129,10 @@ export default class EventEmitter {
     }
 
     const listeners = this._events.get(event);
-    
+
     // Make a copy to avoid issues if listeners are added/removed during emission
     const listenersCopy = [...listeners];
-    
+
     for (const listener of listenersCopy) {
       try {
         listener.apply(this, args);
@@ -149,14 +152,14 @@ export default class EventEmitter {
   listenerCount(event) {
     return this._events.has(event) ? this._events.get(event).length : 0;
   }
-  
+
   /**
    * Add a listener, alias for .on()
    */
   addListener(event, listener) {
     return this.on(event, listener);
   }
-  
+
   /**
    * Get all event names
    * @returns {string[]} - Array of event names

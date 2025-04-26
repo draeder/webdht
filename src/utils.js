@@ -1,14 +1,15 @@
 /**
  * Utility functions for WebDHT
  */
-import { sha1 as sha1Hash, generateRandomId } from './sha1.js';
+import { sha1 as sha1Hash, generateRandomId } from "./sha1.js";
 
 /**
  * Environment detection
  */
 const ENV = {
-  BROWSER: typeof window !== 'undefined',
-  NODE: typeof process !== 'undefined' && process.versions && process.versions.node
+  BROWSER: typeof window !== "undefined",
+  NODE:
+    typeof process !== "undefined" && process.versions && process.versions.node,
 };
 
 /**
@@ -22,15 +23,15 @@ async function sha1(input) {
 
 /**
  * Convert any input to a string
- * @param {any} input 
+ * @param {any} input
  * @return {string}
  */
 function toBuffer(input) {
-  if (typeof input === 'string') return input;
+  if (typeof input === "string") return input;
   if (input instanceof Uint8Array || input instanceof ArrayBuffer) {
     return Array.from(new Uint8Array(input))
-      .map(b => b.toString(16).padStart(2, '0'))
-      .join('');
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
   }
   return String(input);
 }
@@ -44,14 +45,14 @@ function toBuffer(input) {
 function distance(id1, id2) {
   // Convert hex strings to numbers and calculate XOR
   const len = Math.min(id1.length, id2.length);
-  let result = '';
-  
+  let result = "";
+
   for (let i = 0; i < len; i += 2) {
     const byte1 = parseInt(id1.slice(i, i + 2), 16);
     const byte2 = parseInt(id2.slice(i, i + 2), 16);
-    result += (byte1 ^ byte2).toString(16).padStart(2, '0');
+    result += (byte1 ^ byte2).toString(16).padStart(2, "0");
   }
-  
+
   return result;
 }
 
@@ -89,14 +90,14 @@ function getBit(id, bit) {
 function commonPrefixLength(id1, id2) {
   const distHex = distance(id1, id2);
   let count = 0;
-  
+
   for (let i = 0; i < distHex.length; i += 2) {
     const byte = parseInt(distHex.slice(i, i + 2), 16);
     if (byte === 0) {
       count += 8;
       continue;
     }
-    
+
     let b = byte;
     while ((b & 0x80) === 0 && count < 8) {
       count++;
@@ -104,7 +105,7 @@ function commonPrefixLength(id1, id2) {
     }
     break;
   }
-  
+
   return count;
 }
 
@@ -123,16 +124,16 @@ async function generateRandomID() {
  */
 function bufferToHex(buf) {
   // If already a string, assume it's a hex string
-  if (typeof buf === 'string') return buf;
-  
+  if (typeof buf === "string") return buf;
+
   // If it's an array-like object, convert to hex
-  if (buf && typeof buf.length === 'number') {
+  if (buf && typeof buf.length === "number") {
     return Array.from(buf)
-      .map(b => (typeof b === 'number' ? b : 0).toString(16).padStart(2, '0'))
-      .join('');
+      .map((b) => (typeof b === "number" ? b : 0).toString(16).padStart(2, "0"))
+      .join("");
   }
-  
-  return '';
+
+  return "";
 }
 
 /**
@@ -154,5 +155,5 @@ export {
   commonPrefixLength,
   generateRandomID,
   bufferToHex,
-  hexToBuffer
+  hexToBuffer,
 };

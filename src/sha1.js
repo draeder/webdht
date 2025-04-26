@@ -4,14 +4,16 @@
  */
 
 // Environment detection
-const isNode = typeof process !== 'undefined' && 
-               process.versions != null && 
-               process.versions.node != null;
+const isNode =
+  typeof process !== "undefined" &&
+  process.versions != null &&
+  process.versions.node != null;
 
 // Detect if crypto API is available in browser
-const hasCryptoApi = typeof crypto !== 'undefined' && 
-                     typeof crypto.subtle !== 'undefined' && 
-                     typeof crypto.subtle.digest === 'function';
+const hasCryptoApi =
+  typeof crypto !== "undefined" &&
+  typeof crypto.subtle !== "undefined" &&
+  typeof crypto.subtle.digest === "function";
 
 /**
  * Convert a string to Uint8Array
@@ -29,8 +31,8 @@ function strToUint8Array(str) {
  */
 function bytesToHex(bytes) {
   return Array.from(bytes)
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('');
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 /**
@@ -40,10 +42,10 @@ function bytesToHex(bytes) {
  */
 async function nodeSha1(input) {
   // Use native Node.js crypto
-  const crypto = await import('crypto');
-  const hash = crypto.createHash('sha1');
+  const crypto = await import("crypto");
+  const hash = crypto.createHash("sha1");
   hash.update(input);
-  return hash.digest('hex');
+  return hash.digest("hex");
 }
 
 /**
@@ -54,9 +56,9 @@ async function nodeSha1(input) {
 async function browserCryptoSha1(input) {
   const encoder = new TextEncoder();
   const data = encoder.encode(input);
-  const hashBuffer = await crypto.subtle.digest('SHA-1', data);
+  const hashBuffer = await crypto.subtle.digest("SHA-1", data);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /**
@@ -71,7 +73,7 @@ export async function sha1(input) {
   } else if (hasCryptoApi) {
     return await browserCryptoSha1(input);
   } else {
-    throw new Error('No SHA1 implementation available');
+    throw new Error("No SHA1 implementation available");
   }
 }
 
@@ -81,14 +83,15 @@ export async function sha1(input) {
  */
 export async function generateRandomId() {
   // Create a random string
-  const randomStr = Math.random().toString(36) + 
-                   Date.now().toString(36) +
-                   Math.random().toString(36);
+  const randomStr =
+    Math.random().toString(36) +
+    Date.now().toString(36) +
+    Math.random().toString(36);
   // Hash it with SHA1
   return await sha1(randomStr);
 }
 
 export default {
   sha1,
-  generateRandomId
+  generateRandomId,
 };

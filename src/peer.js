@@ -1,22 +1,22 @@
 /**
  * Peer connection handler
  */
-import EventEmitter from './event-emitter.js';
-import { getSimplePeer } from './peer-factory.js';
-import { ENV, bufferToHex } from './utils.js';
+import EventEmitter from "./event-emitter.js";
+import { getSimplePeer } from "./peer-factory.js";
+import { ENV, bufferToHex } from "./utils.js";
 
 class Peer extends EventEmitter {
   /**
    * Create a new peer connection
    * @param {Object} options - Connection options
    * @param {Buffer} options.nodeId - Local node ID
-   * @param {Buffer} options.peerId - Remote peer ID 
+   * @param {Buffer} options.peerId - Remote peer ID
    * @param {boolean} options.initiator - Whether this peer is the initiator
    * @param {Object} options.signal - Signal data (optional)
    */
   constructor(options = {}) {
     super();
-    
+
     this.nodeId = options.nodeId;
     this.peerId = options.peerId;
     this.peerIdHex = this.peerId ? bufferToHex(this.peerId) : null;
@@ -30,17 +30,17 @@ class Peer extends EventEmitter {
       trickle: options.trickle !== false,
       config: {
         iceServers: options.iceServers || [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:global.stun.twilio.com:3478" },
+        ],
       },
-      wrtc: options.wrtc
+      wrtc: options.wrtc,
     };
 
     // Merge any additional simple-peer options
     this.options = {
       ...simplePeerOptions,
-      ...options.simplePeerOptions
+      ...options.simplePeerOptions,
     };
 
     this.signalQueue = [];
@@ -60,17 +60,20 @@ class Peer extends EventEmitter {
     try {
       if (ENV.NODE && !this.options.wrtc) {
         try {
-          const wrtcModule = await import('@koush/wrtc');
+          const wrtcModule = await import("@koush/wrtc");
           this.options.wrtc = wrtcModule.default;
         } catch (wrtcErr) {
-          console.warn('Failed to import wrtc in Node:', wrtcErr.message);
+          console.warn("Failed to import wrtc in Node:", wrtcErr.message);
         }
       }
 
       const createPeer = await getSimplePeer();
-      this.peer = typeof createPeer === 'function' && createPeer.prototype && createPeer.prototype._isSimplePeer
-        ? new createPeer(this.options)
-        : new createPeer(this.options);
+      this.peer =
+        typeof createPeer === "function" &&
+        createPeer.prototype &&
+        createPeer.prototype._isSimplePeer
+          ? new createPeer(this.options)
+          : new createPeer(this.options);
 
       this._setupListeners();
       this.initialized = true;
@@ -80,8 +83,8 @@ class Peer extends EventEmitter {
         this.signal(signal);
       }
     } catch (err) {
-      console.error('Failed to initialize peer:', err.message);
-      this.emit('error', err, this.peerIdHex);
+      console.error("Failed to initialize peer:", err.message);
+      this.emit("error", err, this.peerIdHex);
     }
   }
 
@@ -90,33 +93,33 @@ class Peer extends EventEmitter {
    * @private
    */
   _setupListeners() {
-    this.peer.on('signal', data => {
-      this.emit('signal', data, this.peerIdHex);
+    this.peer.on("signal", (data) => {
+      this.emit("signal", data, this.peerIdHex);
     });
 
-    this.peer.on('connect', () => {
+    this.peer.on("connect", () => {
       this.connected = true;
-      this.emit('connect', this.peerIdHex);
+      this.emit("connect", this.peerIdHex);
     });
 
-    this.peer.on('data', data => {
-      this.emit('data', data, this.peerIdHex);
+    this.peer.on("data", (data) => {
+      this.emit("data", data, this.peerIdHex);
       try {
         const message = JSON.parse(data.toString());
-        this.emit('message', message, this.peerIdHex);
+        this.emit("message", message, this.peerIdHex);
       } catch {
         // Non-JSON data; ignore
       }
     });
 
-    this.peer.on('close', () => {
+    this.peer.on("close", () => {
       this.connected = false;
-      this.emit('close', this.peerIdHex);
+      this.emit("close", this.peerIdHex);
       this.destroy();
     });
 
-    this.peer.on('error', err => {
-      this.emit('error', err, this.peerIdHex);
+    this.peer.on("error", (err) => {
+      this.emit("error", err, this.peerIdHex);
     });
   }
 
@@ -140,9 +143,10 @@ class Peer extends EventEmitter {
    * @param {Object|Buffer|string} data - Data to send
    */
   send(data) {
-    if (!this.connected || this.destroyed || !this.initialized || !this.peer) return false;
+    if (!this.connected || this.destroyed || !this.initialized || !this.peer)
+      return false;
 
-    if (typeof data === 'object' && !(data instanceof Uint8Array)) {
+    if (typeof data === "object" && !(data instanceof Uint8Array)) {
       data = JSON.stringify(data);
     }
 
@@ -150,7 +154,7 @@ class Peer extends EventEmitter {
       this.peer.send(data);
       return true;
     } catch (err) {
-      this.emit('error', err, this.peerIdHex);
+      this.emit("error", err, this.peerIdHex);
       return false;
     }
   }
@@ -165,7 +169,7 @@ class Peer extends EventEmitter {
     if (this.initialized && this.peer) {
       this.peer.destroy();
     }
-    this.emit('destroyed', this.peerIdHex);
+    this.emit("destroyed", this.peerIdHex);
   }
 }
 
