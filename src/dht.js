@@ -705,12 +705,12 @@ class DHT extends EventEmitter {
 
     // Check local storage first
     if (this.storage.has(keyHashHex)) {
-      const value = this.storage.get(keyHashHex).value;
-      if (typeof value !== "undefined") {
+      const entry = this.storage.get(keyHashHex);
+      if (entry && typeof entry.value !== "undefined") {
         peer.send({
           type: 'FIND_VALUE_RESPONSE',
           sender: this.nodeIdHex,
-          value: value,
+          value: entry.value,
           key: keyHashHex
         });
         return;
@@ -1144,7 +1144,13 @@ class DHT extends EventEmitter {
           if (msg.type === 'FIND_VALUE_RESPONSE' && msg.key === keyHashHex) {
             clearTimeout(timeout);
             peer.removeListener('message', messageHandler);
-            resolve(msg.value);
+            // Only return the value if it is actually present
+            if (msg && typeof msg.value !== "undefined") {
+              resolve(msg.value);
+            } else {
+              // If value is not present, return null (not undefined)
+              resolve(null);
+            }
           }
         };
         
