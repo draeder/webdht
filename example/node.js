@@ -55,7 +55,7 @@ async function init() {
           { urls: "stun:global.stun.twilio.com:3478" },
         ],
       },
-      trickle: true,
+      trickle: false,
     },
   };
 
@@ -192,23 +192,49 @@ function attachPeerEvents(peer, peerId) {
 let autoconnectEnabled = false;
 
 function setupDHTEventListeners(dht) {
-  // Add autoconnect logic for new peers
+  // Add autoconnect logic for new peers and registered peers
   if (autoconnectEnabled) {
+    // Handle new peers
     signalingSocket.on("message", (message) => {
       try {
         const data = JSON.parse(message.toString());
-        if (data.type === "new_peer") {
+        
+        // Connect to new peers
+        if (data.type === "new_peer" && data.peerId) {
           console.log(`🔗 Auto-connecting to new peer: ${data.peerId}`);
-          dht
-            .connect({ id: data.peerId })
-            .catch((err) =>
-              console.error(
-                `Auto-connect failed: ${err && err.message ? err.message : err}`
-              )
-            );
+          setTimeout(() => {
+            dht.connect({ id: data.peerId })
+              .then(peer => {
+                console.log(`✅ Auto-connected to peer: ${data.peerId}`);
+                attachPeerEvents(peer, data.peerId);
+              })
+              .catch(err =>
+                console.error(`Auto-connect failed: ${err && err.message ? err.message : err}`)
+              );
+          }, 1000); // Small delay to ensure signaling is ready
+        }
+        
+        // Also connect to existing peers when we first register
+        if (data.type === "registered" && data.peers && data.peers.length > 0) {
+          console.log(`🔍 Found ${data.peers.length} existing peers, connecting...`);
+          
+          // Connect to each existing peer with a small delay between connections
+          data.peers.forEach((peerId, index) => {
+            setTimeout(() => {
+              console.log(`🔗 Auto-connecting to existing peer: ${peerId}`);
+              dht.connect({ id: peerId })
+                .then(peer => {
+                  console.log(`✅ Auto-connected to existing peer: ${peerId}`);
+                  attachPeerEvents(peer, peerId);
+                })
+                .catch(err =>
+                  console.error(`Auto-connect to existing peer failed: ${err && err.message ? err.message : err}`)
+                );
+            }, index * 1000); // Stagger connections by 1 second
+          });
         }
       } catch (err) {
-        // Error handling preserved from existing code
+        console.error("❌ Error processing message for autoconnect:", err);
       }
     });
   }
