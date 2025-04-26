@@ -24,8 +24,8 @@ class Peer extends EventEmitter {
     this.destroyed = false;
     this.initialized = false;
 
-    // Store base options (wrtc will be added later if needed)
-    this.options = {
+    // Extract simple-peer specific options
+    const simplePeerOptions = {
       initiator: options.initiator || false,
       trickle: options.trickle !== false,
       config: {
@@ -34,7 +34,13 @@ class Peer extends EventEmitter {
           { urls: 'stun:global.stun.twilio.com:3478' }
         ]
       },
-      wrtc: options.wrtc // might be undefined
+      wrtc: options.wrtc
+    };
+
+    // Merge any additional simple-peer options
+    this.options = {
+      ...simplePeerOptions,
+      ...options.simplePeerOptions
     };
 
     this.signalQueue = [];

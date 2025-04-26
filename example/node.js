@@ -28,7 +28,38 @@ exit               - Quit the app
 // Initialize DHT
 async function init() {
   autoconnectEnabled = process.argv.includes('--autoconnect');
-  dht = new WebDHT();
+  
+  // Configure DHT with Kademlia and simple-peer options
+  const dhtOptions = {
+    // Kademlia parameters
+    k: 20,               // Size of k-buckets
+    alpha: 3,            // Number of parallel lookups
+    bucketCount: 160,    // Number of k-buckets (SHA1 = 160 bits)
+    maxStoreSize: 1000,  // Maximum number of stored key-value pairs
+    maxKeySize: 1024,    // Maximum key size in bytes (1KB)
+    maxValueSize: 64000, // Maximum value size in bytes (64KB)
+    
+    // Maintenance intervals
+    replicateInterval: 60000,    // Reduce to 1 minute
+    republishInterval: 300000,   // Reduce to 5 minutes
+    
+    // Network parameters
+    maxPeers: 4,         // Maximum number of concurrent peer connections
+    debug: false,        // Debug logging
+    
+    // WebRTC configuration
+    simplePeerOptions: {
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' }
+        ]
+      },
+      trickle: true
+    }
+  };
+
+  dht = new WebDHT(dhtOptions);
 
   dht.on('ready', (nodeId) => {
     console.log(`🟢 DHT ready. Your peer ID: ${nodeId}`);
