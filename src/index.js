@@ -19,4 +19,4 @@ export { Peer, utils };
 
 // Export SHA1 functions directly for convenience
 export { simpleSha1 as sha1, generateRandomId };
-export const { bufferToHex, hexToBuffer } = utils;
+export const { bufferToHex, hexToBuffer, Buffer } = utils;

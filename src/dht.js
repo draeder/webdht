@@ -6,6 +6,7 @@ import Peer from "./peer.js";
 import {
   sha1,
   toBuffer,
+  toBufferObject,
   distance,
   compareBuffers,
   getBit,
@@ -13,6 +14,7 @@ import {
   generateRandomID,
   bufferToHex,
   hexToBuffer,
+  Buffer,
 } from "./utils.js";
 
 // Default Kademlia constants

@@ -13,6 +13,34 @@ const ENV = {
 };
 
 /**
+ * Cross-platform Buffer implementation
+ * Uses Node.js Buffer in Node environment, or polyfills in browser
+ */
+const BufferPolyfill = {
+  from: function(data) {
+    if (ENV.NODE) {
+      // Use native Buffer in Node.js
+      return Buffer.from(data);
+    } else {
+      // Use TextEncoder in browser for strings
+      if (typeof data === 'string') {
+        return new TextEncoder().encode(data);
+      }
+      // For other types, use Uint8Array
+      return new Uint8Array(data);
+    }
+  },
+  isBuffer: function(obj) {
+    if (ENV.NODE) {
+      return Buffer.isBuffer(obj);
+    } else {
+      return obj instanceof Uint8Array;
+    }
+  },
+  // Add other Buffer methods as needed
+};
+
+/**
  * Create a SHA1 hash of the input
  * @param {string} input - The input to hash
  * @return {Promise<string>} The SHA1 hash as hex string
@@ -34,6 +62,15 @@ function toBuffer(input) {
       .join("");
   }
   return String(input);
+}
+
+/**
+ * Convert any input to a buffer-like object
+ * @param {any} input
+ * @return {Uint8Array} - Buffer-like object
+ */
+function toBufferObject(input) {
+  return BufferPolyfill.from(input);
 }
 
 /**
@@ -149,6 +186,7 @@ export {
   ENV,
   sha1,
   toBuffer,
+  toBufferObject,
   distance,
   compareBuffers,
   getBit,
@@ -156,4 +194,5 @@ export {
   generateRandomID,
   bufferToHex,
   hexToBuffer,
+  BufferPolyfill as Buffer,
 };
