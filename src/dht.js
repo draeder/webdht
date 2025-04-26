@@ -705,12 +705,12 @@ class DHT extends EventEmitter {
 
     // Check local storage first
     if (this.storage.has(keyHashHex)) {
-      const entry = this.storage.get(keyHashHex);
-      if (entry && typeof entry.value !== "undefined") {
+      const value = this.storage.get(keyHashHex).value;
+      if (typeof value !== "undefined") {
         peer.send({
           type: 'FIND_VALUE_RESPONSE',
           sender: this.nodeIdHex,
-          value: entry.value,
+          value: value,
           key: keyHashHex
         });
         return;
@@ -840,8 +840,14 @@ class DHT extends EventEmitter {
     }
 
     // Store the value
-    this.storage.set(keyHashHex, value);
-    this.storageTimestamps.set(keyHashHex, Date.now());
+    // Store with metadata structure for consistency with put() method
+    const timestamp = Date.now();
+    this.storage.set(keyHashHex, {
+      value,
+      timestamp,
+      replicatedTo: new Set()
+    });
+    this.storageTimestamps.set(keyHashHex, timestamp);
 
     // Enforce storage size limit
     if (this.storage.size > this.MAX_STORE_SIZE) {
@@ -1107,7 +1113,9 @@ class DHT extends EventEmitter {
     
     // Check local storage first
     if (this.storage.has(keyHashHex)) {
-      return this.storage.get(keyHashHex);
+      const storedData = this.storage.get(keyHashHex);
+      // Return just the value, not the metadata
+      return storedData.value;
     }
 
     // Find closest nodes to the key
@@ -1144,13 +1152,7 @@ class DHT extends EventEmitter {
           if (msg.type === 'FIND_VALUE_RESPONSE' && msg.key === keyHashHex) {
             clearTimeout(timeout);
             peer.removeListener('message', messageHandler);
-            // Only return the value if it is actually present
-            if (msg && typeof msg.value !== "undefined") {
-              resolve(msg.value);
-            } else {
-              // If value is not present, return null (not undefined)
-              resolve(null);
-            }
+            resolve(msg.value);
           }
         };
         
@@ -1169,9 +1171,14 @@ class DHT extends EventEmitter {
     // Return first non-null result
     for (const result of results) {
       if (result !== null) {
-        // Store result locally for future use
-        this.storage.set(keyHashHex, result);
-        this.storageTimestamps.set(keyHashHex, Date.now());
+        // Store result locally for future use with metadata structure
+        const timestamp = Date.now();
+        this.storage.set(keyHashHex, {
+          value: result,
+          timestamp,
+          replicatedTo: new Set()
+        });
+        this.storageTimestamps.set(keyHashHex, timestamp);
         return result;
       }
     }
@@ -1187,7 +1194,7 @@ class DHT extends EventEmitter {
    */
   _replicateData() {
     this._logDebug('Starting data replication...'); // Use _logDebug
-    this.storage.forEach(async (value, keyHashHex) => {
+    this.storage.forEach(async (storedData, keyHashHex) => {
       const keyHash = hexToBuffer(keyHashHex);
       const nodes = await this.findNode(keyHashHex); // Find current K closest
       this._logDebug(`Replicating key ${keyHashHex.substring(0,4)} to ${nodes.length} nodes`); // Use _logDebug
@@ -1199,7 +1206,7 @@ class DHT extends EventEmitter {
             type: 'STORE',
             sender: this.nodeIdHex,
             key: keyHashHex, // Use hash as key for replication
-            value: value
+            value: storedData.value // Send only the value, not the metadata
           });
         }
       });
@@ -1212,7 +1219,7 @@ class DHT extends EventEmitter {
    */
   _republishData() {
     this._logDebug('Starting data republication...'); // Use _logDebug
-    this.storage.forEach(async (value, keyHashHex) => {
+    this.storage.forEach(async (storedData, keyHashHex) => {
       this._logDebug(`Republishing key ${keyHashHex.substring(0,4)}`);
       const nodes = await this.findNode(keyHashHex);
       nodes.forEach(node => {
@@ -1222,7 +1229,7 @@ class DHT extends EventEmitter {
             type: 'STORE',
             sender: this.nodeIdHex,
             key: keyHashHex,
-            value: value
+            value: storedData.value // Send only the value, not the metadata
           });
         }
       });
@@ -1238,7 +1245,7 @@ class DHT extends EventEmitter {
     this._logDebug(`Checking replication needs for new peer: ${newPeerIdHex.substring(0,4)}`); // Use _logDebug
     const newPeerIdBuffer = hexToBuffer(newPeerIdHex);
 
-    for (const [keyHashHex, value] of this.storage.entries()) {
+    for (const [keyHashHex, storedData] of this.storage.entries()) {
       const keyHashBuffer = hexToBuffer(keyHashHex);
       const closestNodes = await this.findNode(keyHashHex); // Find K closest nodes *now*
 
@@ -1253,7 +1260,7 @@ class DHT extends EventEmitter {
             type: 'STORE',
             sender: this.nodeIdHex,
             key: keyHashHex,
-            value: value
+            value: storedData.value // Send only the value, not the metadata
           });
         }
       }
