@@ -226,22 +226,21 @@ class DHT extends EventEmitter {
       // Clean up peer connection
       peer.destroy();
       this.peers.delete(peerId);
-      
+
       // Remove from routing table
       for (let i = 0; i < this.BUCKET_COUNT; i++) {
         this.buckets[i].remove(peerId);
       }
-      
+
       // Clean up any stored data for this peer
       for (const [key, value] of this.storage.entries()) {
         if (value.replicatedTo && value.replicatedTo.has(peerId)) {
           value.replicatedTo.delete(peerId);
         }
       }
-      
-      // Emit disconnect event
-      this.emit('peer:disconnect', peerId, 'disconnected');
     }
+    // Always emit disconnect event, even if peer wasn't found
+    this.emit('peer:disconnect', peerId, 'disconnected');
   }
   constructor(options = {}) {
     super();
@@ -519,6 +518,9 @@ class DHT extends EventEmitter {
     
     // Add to routing table
     this._addNode({ id: peerId });
+
+    // Replicate relevant key-value pairs to the new peer if it is now among the K closest for any key
+    this._replicateToNewPeer(peerId);
 
     return peer;
   }

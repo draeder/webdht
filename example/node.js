@@ -150,13 +150,29 @@ function connectToSignalingServer(dht, nodeId) {
 
 // Attach peer events (used for both connect and signal)
 function attachPeerEvents(peer, peerId) {
+  if (peer._eventsAttached) return; // Prevent duplicate listeners
+  peer._eventsAttached = true;
+
   peer.on('connect', () => {
     console.log(`🟢 Connected to ${peerId}`);
     peer.send(`Hello from ${dht.nodeId}`);
   });
 
   peer.on('data', (data) => {
-    console.log(`📨 Message from ${peerId}:`, data.toString());
+    if (!dht.debug) return;
+    const message = data.toString();
+    console.log(`📨 Message from ${peerId}:`, message);
+    
+    // Add to messages list if it exists
+    const messagesList = document.getElementById('messagesList');
+    if (messagesList) {
+      // Add formatted message to the list
+      const formattedMessage = formatMessage(peerId, message, false);
+      messagesList.appendChild(formattedMessage);
+      
+      // Scroll to the bottom of the messages list
+      messagesList.scrollTop = messagesList.scrollHeight;
+    }
   });
 
   peer.on('error', (err) => {
@@ -180,7 +196,7 @@ function setupDHTEventListeners(dht) {
         if (data.type === 'new_peer') {
           console.log(`🔗 Auto-connecting to new peer: ${data.peerId}`);
           dht.connect({ id: data.peerId }).catch(err => 
-            console.error(`Auto-connect failed: ${err.message}`));
+            console.error(`Auto-connect failed: ${err && err.message ? err.message : err}`));
         }
       } catch (err) {
         // Error handling preserved from existing code
@@ -196,7 +212,11 @@ function setupDHTEventListeners(dht) {
   });
 
   dht.on('peer:error', (peerId, err) => {
-    console.error(`❌ DHT error with peer ${peerId}:`, err);
+    const idStr = typeof peerId === 'string'
+      ? peerId
+      : (peerId && peerId.id ? peerId.id : JSON.stringify(peerId));
+    const errStr = err && err.message ? err.message : JSON.stringify(err);
+    console.error(`❌ DHT error with peer ${idStr}: ${errStr}`);
   });
 }
 
