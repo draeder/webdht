@@ -701,24 +701,20 @@ class DHT extends EventEmitter {
     });
     // Always hash the incoming key for lookup, unless already a 40-char hex string
     const keyStr = message.key;
-    let keyHashHex;
-    if (/^[a-fA-F0-9]{40}$/.test(keyStr)) {
-      keyHashHex = keyStr;
-    } else {
-      keyHashHex = bufferToHex(sha1(toBuffer(keyStr)));
-    }
+    const keyHashHex = /^[a-fA-F0-9]{40}$/.test(keyStr) ? keyStr : bufferToHex(sha1(toBuffer(keyStr)));
 
     // Check local storage first
     if (this.storage.has(keyHashHex)) {
-      const stored = this.storage.get(keyHashHex);
-      const value = stored && stored.value !== undefined ? stored.value : stored;
-      peer.send({
-        type: 'FIND_VALUE_RESPONSE',
-        sender: this.nodeIdHex,
-        value: value,
-        key: keyHashHex
-      });
-      return;
+      const value = this.storage.get(keyHashHex).value;
+      if (typeof value !== "undefined") {
+        peer.send({
+          type: 'FIND_VALUE_RESPONSE',
+          sender: this.nodeIdHex,
+          value: value,
+          key: keyHashHex
+        });
+        return;
+      }
     }
 
     // If not found, immediately find K closest nodes and send them in response
