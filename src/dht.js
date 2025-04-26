@@ -758,27 +758,47 @@ class DHT extends EventEmitter {
       port: null
     });
 
-    // Validate key size
+    // Validate key presence and type
     const keyStr = message.key;
-    if (typeof keyStr !== "string" || 
-        !keyStr.trim() || 
-        keyStr === ":" || 
-        keyStr === "undefined" || 
-        keyStr === "null" ||
-        Buffer.from(keyStr).length > this.MAX_KEY_SIZE) {
-      console.warn('[DHT._handleStore] Invalid key or key too large:', keyStr);
+    if (typeof keyStr !== "string" || !keyStr.trim() || keyStr === ":" || keyStr === "undefined" || keyStr === "null") {
+      console.warn('[DHT._handleStore] Invalid key:', keyStr);
       peer.send({
         type: 'STORE_RESPONSE',
         sender: this.nodeIdHex,
         success: false,
         key: keyStr,
-        error: 'Invalid key or key too large'
+        error: 'Invalid key'
+      });
+      return;
+    }
+    // Validate key size
+    if (Buffer.from(keyStr).length > this.MAX_KEY_SIZE) {
+      console.warn('[DHT._handleStore] Key too large:', keyStr);
+      peer.send({
+        type: 'STORE_RESPONSE',
+        sender: this.nodeIdHex,
+        success: false,
+        key: keyStr,
+        error: 'Key too large'
+      });
+      return;
+    }
+
+    // Validate value presence
+    const value = message.value;
+    if (typeof value === "undefined" || value === null) {
+      console.warn('[DHT._handleStore] Value is undefined or null');
+      peer.send({
+        type: 'STORE_RESPONSE',
+        sender: this.nodeIdHex,
+        success: false,
+        key: keyStr,
+        error: 'Value is undefined or null'
       });
       return;
     }
 
     // Validate value size
-    const value = message.value;
     const valueSize = typeof value === 'string' 
       ? Buffer.from(value).length 
       : Buffer.isBuffer(value) 
