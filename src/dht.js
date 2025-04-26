@@ -701,20 +701,48 @@ class DHT extends EventEmitter {
     });
     // Always hash the incoming key for lookup, unless already a 40-char hex string
     const keyStr = message.key;
-    const keyHashHex = /^[a-fA-F0-9]{40}$/.test(keyStr) ? keyStr : bufferToHex(sha1(keyStr));
-    // If we have the value, return it
+    let keyHashHex;
+    if (/^[a-fA-F0-9]{40}$/.test(keyStr)) {
+      keyHashHex = keyStr;
+    } else {
+      keyHashHex = bufferToHex(sha1(toBuffer(keyStr)));
+    }
+
+    // Check local storage first
     if (this.storage.has(keyHashHex)) {
+      const stored = this.storage.get(keyHashHex);
+      const value = stored && stored.value !== undefined ? stored.value : stored;
       peer.send({
         type: 'FIND_VALUE_RESPONSE',
         sender: this.nodeIdHex,
-        key: keyHashHex,
-        value: this.storage.get(keyHashHex)
+        value: value,
+        key: keyHashHex
       });
       return;
     }
-    // Otherwise, return closest nodes
-    // Use the hashed key as the target
-    this._handleFindNode({ ...message, target: keyHashHex }, peerId);
+
+    // If not found, immediately find K closest nodes and send them in response
+    let closestNodes = [];
+    for (let i = 0; i < this.BUCKET_COUNT; i++) {
+      closestNodes = closestNodes.concat(this.buckets[i].nodes);
+    }
+    closestNodes = closestNodes
+      .sort((a, b) => {
+        const distA = distance(a.id, hexToBuffer(keyHashHex));
+        const distB = distance(b.id, hexToBuffer(keyHashHex));
+        return compareBuffers(distA, distB);
+      })
+      .slice(0, this.K)
+      .map(node => ({
+        id: bufferToHex(node.id)
+      }));
+
+    peer.send({
+      type: 'FIND_VALUE_RESPONSE',
+      sender: this.nodeIdHex,
+      nodes: closestNodes,
+      key: keyHashHex
+    });
   }
   
   /**
