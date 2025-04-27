@@ -540,13 +540,31 @@ class DHT extends EventEmitter {
       }
     }
 
+    // Extract WebRTC-specific options
+    const {
+      initiator = true,
+      reconnectTimer,
+      iceCompleteTimeout,
+      retries,
+      simplePeerOptions: peerSpecificOptions
+    } = peerInfo;
+
+    // Merge the simple-peer options with any peer-specific options
+    const mergedOptions = {
+      ...this.simplePeerOptions,
+      ...(peerSpecificOptions || {})
+    };
+
     // Create new peer connection with merged options
     const peer = new Peer({
       nodeId: this.nodeId,
       peerId: peerId,
-      initiator: true,
+      initiator: initiator,
       signal: peerInfo.signal,
-      ...this.simplePeerOptions, // Merge in the simple-peer options
+      reconnectTimer: reconnectTimer,
+      iceCompleteTimeout: iceCompleteTimeout,
+      retries: retries,
+      ...mergedOptions, // Merge in the simple-peer options
     });
 
     this.peers.set(peerId, peer);
@@ -629,8 +647,57 @@ class DHT extends EventEmitter {
   _setupPeerHandlers(peer) {
     // Forward signal events
     peer.on("signal", (data, peerId) => {
-      this.emit("signal", { id: peerId, signal: data });
+      // Detect WebRTC signaling messages
+      const isWebRTCSignal = data && (data.type === 'offer' || data.type === 'answer' || data.candidate);
+      
+      // For initial peers or WebRTC signaling, ALWAYS use the server
+      const peerCount = this.peers.size;
+      const useServer = peerCount <= 2 || isWebRTCSignal;
+      
+      if (useServer) {
+        // For WebRTC signaling or initial peers, always emit directly to use the server
+        this._logDebug(`Using server for WebRTC signal or initial peer connection to ${peerId}`);
+        this.emit("signal", { id: peerId, signal: data, viaDht: false });
+        return;
+      }
+      
+      // For established connections and non-WebRTC signals, try DHT routing
+      if (this.peers.size > 2 && Math.random() < 0.8) { // 80% chance to try DHT routing
+        try {
+          // Find the closest peers to route through
+          const otherPeers = Array.from(this.peers.entries())
+            .filter(([id, p]) => id !== peerId && p.connected)
+            .slice(0, 2); // Take up to 2 peers
+            
+          if (otherPeers.length > 0) {
+            this._logDebug(`Attempting to route signal to ${peerId} through DHT instead of emitting`);
+            
+            // Only use one peer for routing to reduce traffic
+            const [routePeerId, routePeer] = otherPeers[0];
+            this._logDebug(`Routing signal to ${peerId} via ${routePeerId}`);
+            routePeer.send({
+              type: "SIGNAL",
+              sender: this.nodeIdHex,
+              originalSender: this.nodeIdHex,
+              signal: data,
+              target: peerId,
+              ttl: 3,
+              viaDht: true,
+              signalPath: [this.nodeIdHex]
+            });
+            
+            // Don't emit the signal event if we successfully routed through DHT
+            return;
+          }
+        } catch (err) {
+          this._logDebug(`Error routing signal through DHT: ${err.message}`);
+        }
+      }
+      
+      // Fall back to emitting the signal event if DHT routing failed or wasn't attempted
+      this.emit("signal", { id: peerId, signal: data, viaDht: false });
     });
+    
     // Handle successful connection
     peer.on("connect", (peerId) => {
       console.log(`Connected to peer: ${peerId}`);
@@ -648,6 +715,30 @@ class DHT extends EventEmitter {
       });
       // Replicate relevant key-value pairs to the new peer if it is now among the K closest for any key
       this._replicateToNewPeer(peerId);
+      
+      // Immediately try to establish DHT routes with this new peer
+      if (this.peers.size > 1) {
+        this._logDebug(`Establishing DHT routes for newly connected peer ${peerId.substring(0, 8)}...`);
+        
+        // Find other peers to establish routes through
+        const otherPeers = Array.from(this.peers.entries())
+          .filter(([id, p]) => id !== peerId && p.connected)
+          .slice(0, 3); // Take up to 3 peers
+          
+        for (const [routePeerId, routePeer] of otherPeers) {
+          this._logDebug(`Establishing DHT route between ${peerId.substring(0, 8)}... and ${routePeerId.substring(0, 8)}...`);
+          routePeer.send({
+            type: "SIGNAL",
+            sender: this.nodeIdHex,
+            originalSender: peerId,
+            signal: { type: "PING" },
+            target: routePeerId,
+            ttl: 3,
+            viaDht: true,
+            signalPath: [this.nodeIdHex]
+          });
+        }
+      }
     });
 
     // Handle messages
@@ -686,14 +777,41 @@ class DHT extends EventEmitter {
     // Check if we know this peer
     if (this.peers.has(peerId)) {
       const peer = this.peers.get(peerId);
+      
+      // Check if this is an ICE candidate or WebRTC signaling message
+      const isIceCandidate = data.signal && data.signal.candidate;
+      const isWebRTCSignal = data.signal && (data.signal.type === 'offer' || data.signal.type === 'answer');
+      
+      // Pass the signal to the peer
       peer.signal(data.signal);
       
       // If this signal didn't come through the DHT, try to establish a DHT route for future signals
-      // But only do this occasionally to reduce signaling traffic
-      if (!viaDht && this.peers.size > 1 && Math.random() < 0.3) { // Only attempt 30% of the time
+      // But don't do this for WebRTC signaling or ICE candidates during initial connection
+      if (!viaDht && !isWebRTCSignal && !isIceCandidate && this.peers.size > 1 && Math.random() < 0.8) {
         this._logDebug(`Received direct signal from ${peerId.substring(0, 8)}..., establishing DHT route for future signals`);
         // Send a ping through the DHT to establish routing, with signal path tracking
         this._routeSignalThroughDHT(peerId, this.nodeIdHex, { type: "PING" }, 2, [this.nodeIdHex]);
+        
+        // Also try to establish routes through other peers to increase chances of success
+        const otherPeers = Array.from(this.peers.entries())
+          .filter(([id, p]) => id !== peerId && p.connected)
+          .slice(0, 2); // Limit to 2 other peers
+          
+        for (const [routePeerId, routePeer] of otherPeers) {
+          if (routePeer && routePeer.connected) {
+            this._logDebug(`Establishing additional DHT route to ${peerId.substring(0, 8)}... via ${routePeerId.substring(0, 8)}...`);
+            routePeer.send({
+              type: "SIGNAL",
+              sender: this.nodeIdHex,
+              originalSender: this.nodeIdHex,
+              signal: { type: "PING" },
+              target: peerId,
+              ttl: 2,
+              viaDht: true,
+              signalPath: [this.nodeIdHex]
+            });
+          }
+        }
       }
       
       return peer;
@@ -710,11 +828,23 @@ class DHT extends EventEmitter {
       }
     }
 
-    // Create new peer
+    // Extract WebRTC-specific options from the data
+    const {
+      reconnectTimer,
+      iceCompleteTimeout,
+      retries,
+      simplePeerOptions: peerSpecificOptions
+    } = data;
+
+    // Create new peer with improved ICE handling
     const peer = new Peer({
       nodeId: this.nodeId,
       peerId: peerId,
       initiator: false,
+      reconnectTimer: reconnectTimer || 3000, // Default to 3 seconds
+      iceCompleteTimeout: iceCompleteTimeout || 5000, // Default to 5 seconds
+      retries: retries || 2, // Default to 2 retries
+      simplePeerOptions: peerSpecificOptions || this.simplePeerOptions
     });
 
     this.peers.set(peerId, peer);
@@ -726,11 +856,33 @@ class DHT extends EventEmitter {
       this._logDebug(`Connected to new peer ${peerId.substring(0, 8)}..., discovering more peers`);
       
       // If this connection wasn't established through the DHT, try to establish DHT routes
-      // But only do this occasionally to reduce signaling traffic
-      if (!viaDht && Math.random() < 0.3) { // Only attempt 30% of the time
+      // But only after the connection is fully established to avoid interfering with ICE
+      // Increase the probability to 80% to boost DHT signal percentage
+      if (!viaDht && Math.random() < 0.8 && peer.connected) { // Only if peer is fully connected
         this._logDebug(`Connection to ${peerId.substring(0, 8)}... wasn't through DHT, establishing DHT routes`);
         // Send a ping through the DHT to establish routing, with signal path tracking
         this._routeSignalThroughDHT(peerId, this.nodeIdHex, { type: "PING" }, 2, [this.nodeIdHex]);
+        
+        // Also try to establish routes through other peers to increase chances of success
+        const otherPeers = Array.from(this.peers.entries())
+          .filter(([id, p]) => id !== peerId && p.connected)
+          .slice(0, 2); // Limit to 2 other peers
+          
+        for (const [routePeerId, routePeer] of otherPeers) {
+          if (routePeer && routePeer.connected) {
+            this._logDebug(`Establishing additional DHT route to ${peerId.substring(0, 8)}... via ${routePeerId.substring(0, 8)}...`);
+            routePeer.send({
+              type: "SIGNAL",
+              sender: this.nodeIdHex,
+              originalSender: this.nodeIdHex,
+              signal: { type: "PING" },
+              target: peerId,
+              ttl: 2,
+              viaDht: true,
+              signalPath: [this.nodeIdHex]
+            });
+          }
+        }
       }
       
       // Wait a short time to ensure the connection is stable
@@ -1127,7 +1279,7 @@ class DHT extends EventEmitter {
    * Route a signal through the DHT to reach a target peer
    * @private
    */
-  async _routeSignalThroughDHT(targetId, senderId, signal, ttl = 2, signalPath = []) {
+  async _routeSignalThroughDHT(targetId, senderId, signal, ttl = 3, signalPath = []) {
     try {
       // If TTL is 0 or less, don't route further
       if (ttl <= 0) {
@@ -1171,8 +1323,8 @@ class DHT extends EventEmitter {
         return;
       }
       
-      // Take the closest 3 nodes (or fewer if we don't have 3)
-      const closestNodes = connectedNodes.slice(0, 3);
+      // Take up to 5 nodes (increased from 3) to improve routing success rate
+      const closestNodes = connectedNodes.slice(0, 5);
       
       // Forward the signal to each of the closest nodes
       for (const node of closestNodes) {

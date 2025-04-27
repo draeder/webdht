@@ -48,7 +48,7 @@ async function initApp() {
 // Discover peers through the DHT and connect to them
 async function startDhtPeerDiscovery(dht) {
   // Only start discovery if we have at least one peer (bootstrap node)
-  if (dht.peers.size === 0) {
+  if (dht.peers.size === 1) {
     console.log("No peers connected yet, delaying DHT peer discovery");
     setTimeout(() => startDhtPeerDiscovery(dht), 5000);
     return;
@@ -300,18 +300,32 @@ function connectToSignalingServer(dht, nodeId) {
                 // Automatically connect to the new peer if we don't have any connections yet
                 // or if we're the second peer (which means we should connect to the first peer)
                 if (dht.peers.size === 0) {
-                  console.log(`Automatically connecting to peer: ${data.peerId.substring(0, 8)}...`);
-                  updateStatus(`Connecting to: ${data.peerId.substring(0, 8)}...`);
+                  // Use lexicographical comparison to determine who initiates the connection
+                  // This ensures only one side tries to be the initiator
+                  const shouldInitiate = dht.nodeId < data.peerId;
                   
-                  // Initiate connection
-                  initiateConnection(dht, data.peerId)
-                    .then(peer => {
-                      console.log(`Auto-connected to peer: ${data.peerId.substring(0, 8)}...`);
+                  if (shouldInitiate) {
+                    console.log(`Automatically connecting to peer: ${data.peerId.substring(0, 8)}... (we are initiator)`);
+                    updateStatus(`Connecting to: ${data.peerId.substring(0, 8)}...`);
+                    
+                    // Initiate connection
+                    // Add improved ICE configuration for better connection reliability
+                    initiateConnection(dht, data.peerId, true, {
+                      reconnectTimer: 3000,
+                      iceCompleteTimeout: 5000,
+                      retries: 3
                     })
-                    .catch(err => {
-                      console.error(`Failed to auto-connect to peer: ${err.message}`);
-                      updateStatus(`Connection failed: ${err.message}`, true);
-                    });
+                      .then(peer => {
+                        console.log(`Auto-connected to peer: ${data.peerId.substring(0, 8)}...`);
+                      })
+                      .catch(err => {
+                        console.error(`Failed to auto-connect to peer: ${err.message}`);
+                        updateStatus(`Connection failed: ${err.message}`, true);
+                      });
+                  } else {
+                    console.log(`Waiting for peer ${data.peerId.substring(0, 8)}... to initiate connection to us`);
+                    updateStatus(`Waiting for connection from: ${data.peerId.substring(0, 8)}...`);
+                  }
                 }
               }
             }
@@ -348,12 +362,38 @@ function connectToSignalingServer(dht, nodeId) {
               `Processing signal from: ${data.peerId.substring(0, 8)}...`
             );
             
-            // Try to route this signal through the DHT for future communications
-            // But only do this occasionally to reduce signaling traffic
-            if (dht.peers.size > 0 && Math.random() < 0.3) { // Only attempt 30% of the time
-              console.log(`Attempting to establish DHT route to ${data.peerId.substring(0, 8)}...`);
+            // Detect if this is a WebRTC signaling message
+            const isWebRTCSignal = data.signal && (data.signal.type === 'offer' || data.signal.type === 'answer' || data.signal.candidate);
+            
+            // Only try to establish DHT routes for non-WebRTC signals or after connection is established
+            // This prevents WebRTC signaling state conflicts
+            if (!isWebRTCSignal && dht.peers.size > 2 && Math.random() < 0.5) { // Only 50% chance and only if we have more than 2 peers
+              console.log(`Establishing DHT route to ${data.peerId.substring(0, 8)}...`);
               // Pass an initial signal path to prevent loops
               dht._routeSignalThroughDHT(data.peerId, dht.nodeId, { type: "PING" }, 2, [dht.nodeId]);
+              
+              // Only use one other peer to establish routes to reduce traffic
+              const otherPeers = Array.from(dht.peers.keys())
+                .filter(id => id !== data.peerId && id !== dht.nodeId)
+                .slice(0, 1); // Limit to 1 other peer
+                
+              if (otherPeers.length > 0) {
+                const routePeerId = otherPeers[0];
+                const routePeer = dht.peers.get(routePeerId);
+                if (routePeer && routePeer.connected) {
+                  console.log(`Establishing additional DHT route to ${data.peerId.substring(0, 8)}... via ${routePeerId.substring(0, 8)}...`);
+                  routePeer.send({
+                    type: "SIGNAL",
+                    sender: dht.nodeId,
+                    originalSender: dht.nodeId,
+                    signal: { type: "PING" },
+                    target: data.peerId,
+                    ttl: 2,
+                    viaDht: true,
+                    signalPath: [dht.nodeId]
+                  });
+                }
+              }
             }
             
             // This is a server-routed signal since it came through the signaling server
@@ -428,11 +468,18 @@ function connectToSignalingServer(dht, nodeId) {
         return; // No need to forward it again
       }
       
-      // Try to route through DHT first if appropriate, but be smarter about when to use it
+      // Detect WebRTC signaling messages
+      const isWebRTCSignal = data.signal && (data.signal.type === 'offer' || data.signal.type === 'answer');
+      const isICECandidate = data.signal && data.signal.candidate;
+      
+      // For initial peers or WebRTC signaling, ALWAYS use the server
+      const peerCount = dht.peers.size;
+      const useServer = peerCount <= 2 || isWebRTCSignal;
+      
+      // Try to route through DHT only for established connections and non-critical signals
       let signalSent = false;
       
-      // Check if we have any connected peers
-      if (dht.peers.size > 0) {
+      if (!useServer && dht.peers.size > 0) {
         try {
           // First check if we can reach the target peer directly through the DHT
           console.log(`Checking if peer ${targetPeerId.substr(0, 8)}... can be reached through DHT`);
@@ -474,13 +521,10 @@ function connectToSignalingServer(dht, nodeId) {
             } else {
               console.log(`Peer ${targetPeerId.substr(0, 8)}... is in routing table but not directly connected`);
             }
-          } else {
-            // Only try DHT routing for some signals to reduce traffic
-            // For WebRTC signaling, the first few signals are critical, so always use the server for reliability
-            // For other types of signals, we can try DHT routing
-            const isWebRTCSignal = data.signal && (data.signal.type === 'offer' || data.signal.type === 'answer');
-            
-            if (!isWebRTCSignal || Math.random() < 0.5) { // For WebRTC signals, only try DHT 50% of the time
+          } else if (peerCount > 2) { // Only try routing through others if we have more than 2 peers
+            // For ICE candidates, use DHT 80% of the time
+            // For other non-WebRTC signals, use DHT 90% of the time
+            if ((isICECandidate && Math.random() < 0.8) || (!isICECandidate && !isWebRTCSignal && Math.random() < 0.9)) {
               // Try to route the signal through the DHT network
               console.log(`Peer ${targetPeerId.substr(0, 8)}... is not directly connected, trying to route through DHT`);
               
@@ -497,7 +541,7 @@ function connectToSignalingServer(dht, nodeId) {
               if (closestPeers.length > 0) {
                 console.log(`Found ${closestPeers.length} potential routing peers for ${targetPeerId.substr(0, 8)}...`);
                 
-                // Send the signal to only the closest peer for routing to reduce traffic
+                // Only use one peer for routing to reduce traffic and prevent signaling conflicts
                 const { id: routePeerId } = closestPeers[0];
                 const routePeer = dht.peers.get(routePeerId);
                 
@@ -574,13 +618,17 @@ function connectToSignalingServer(dht, nodeId) {
 let originalDhtEmit = null;
 
 // Initiate a connection to a peer
-async function initiateConnection(dht, peerId) {
+async function initiateConnection(dht, peerId, forceInitiator = false, additionalOptions = {}) {
   if (!peerId) {
     console.error("No peer ID provided");
     return;
   }
 
-  console.log(`Initiating connection to peer: ${peerId}`);
+  // Use lexicographical comparison to determine who initiates the connection
+  // This ensures only one side tries to be the initiator
+  const shouldInitiate = forceInitiator || dht.nodeId < peerId;
+  
+  console.log(`Initiating connection to peer: ${peerId} (${shouldInitiate ? "we are" : "we are not"} the initiator)`);
 
   // Override the DHT's emit method ONLY ONCE to handle signaling
   if (!originalDhtEmit) {
@@ -618,8 +666,51 @@ async function initiateConnection(dht, peerId) {
     // Connect to the peer through the DHT
     // Note: DHT.connect expects an object with an 'id' property, not just a string
     console.log(`Connecting to DHT peer: ${peerId}`);
+    
+    // Add improved ICE configuration for better connection reliability
     const peer = await dht.connect({
       id: peerId,
+      initiator: shouldInitiate,
+      // Add improved ICE servers
+      simplePeerOptions: {
+        config: {
+          iceServers: [
+            { urls: "stun:stun.l.google.com:19302" },
+            { urls: "stun:stun1.l.google.com:19302" },
+            { urls: "stun:stun2.l.google.com:19302" },
+            { urls: "stun:stun3.l.google.com:19302" },
+            { urls: "stun:stun4.l.google.com:19302" },
+            { urls: "stun:global.stun.twilio.com:3478" },
+            // Add free TURN servers for better NAT traversal
+            {
+              urls: "turn:openrelay.metered.ca:80",
+              username: "openrelayproject",
+              credential: "openrelayproject"
+            },
+            {
+              urls: "turn:openrelay.metered.ca:443",
+              username: "openrelayproject",
+              credential: "openrelayproject"
+            },
+            {
+              urls: "turn:openrelay.metered.ca:443?transport=tcp",
+              username: "openrelayproject",
+              credential: "openrelayproject"
+            }
+          ],
+          iceCandidatePoolSize: 10,
+          iceTransportPolicy: "all"
+        },
+        trickle: false, // Enable trickle ICE for better connection success
+        sdpTransform: (sdp) => {
+          // Add aggressive ICE restart and connection timeout settings
+          return sdp.replace(/a=ice-options:trickle\r\n/g,
+                            "a=ice-options:trickle renomination\r\n")
+                   .replace(/a=setup:actpass\r\n/g,
+                            "a=setup:actpass\r\na=connection-timeout:10\r\n");
+        }
+      },
+      ...additionalOptions
     });
 
     // Set up event handlers for this peer connection
@@ -747,9 +838,17 @@ function setupUI(dht) {
         return;
       }
 
+      // Use lexicographical comparison to determine who initiates the connection
+      const shouldInitiate = dht.nodeId < peerIdInput;
+      console.log(`${shouldInitiate ? "We are" : "We are not"} the initiator for this connection`);
+      
       // Just call initiateConnection - we'll handle all the signaling there
       statusEl.textContent = `Connecting to: ${peerIdInput.substring(0, 8)}...`;
-      const peer = await initiateConnection(dht, peerIdInput);
+      const peer = await initiateConnection(dht, peerIdInput, shouldInitiate, {
+        reconnectTimer: 3000,
+        iceCompleteTimeout: 5000,
+        retries: 3
+      });
 
       if (peer) {
         statusEl.textContent = `Connected to: ${peerIdInput.substring(

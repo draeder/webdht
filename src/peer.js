@@ -23,6 +23,14 @@ class Peer extends EventEmitter {
     this.connected = false;
     this.destroyed = false;
     this.initialized = false;
+    
+    // Store retry and reconnection options
+    this.reconnectTimer = options.reconnectTimer || 0; // Default: no auto-reconnect
+    this.iceCompleteTimeout = options.iceCompleteTimeout || 0; // Default: no timeout
+    this.retries = options.retries || 0; // Default: no retries
+    this.currentRetry = 0;
+    this.reconnectTimeout = null;
+    this.iceTimeoutTimer = null;
 
     // Extract simple-peer specific options
     const simplePeerOptions = {
@@ -31,10 +39,13 @@ class Peer extends EventEmitter {
       config: {
         iceServers: options.iceServers || [
           { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun1.l.google.com:19302" },
+          { urls: "stun:stun2.l.google.com:19302" },
           { urls: "stun:global.stun.twilio.com:3478" },
         ],
       },
       wrtc: options.wrtc,
+      sdpTransform: options.sdpTransform,
     };
 
     // Merge any additional simple-peer options
@@ -99,6 +110,20 @@ class Peer extends EventEmitter {
 
     this.peer.on("connect", () => {
       this.connected = true;
+      this.currentRetry = 0; // Reset retry counter on successful connection
+      
+      // Clear any pending reconnect timeouts
+      if (this.reconnectTimeout) {
+        clearTimeout(this.reconnectTimeout);
+        this.reconnectTimeout = null;
+      }
+      
+      // Clear any ICE timeout timers
+      if (this.iceTimeoutTimer) {
+        clearTimeout(this.iceTimeoutTimer);
+        this.iceTimeoutTimer = null;
+      }
+      
       this.emit("connect", this.peerIdHex);
     });
 
@@ -115,12 +140,54 @@ class Peer extends EventEmitter {
     this.peer.on("close", () => {
       this.connected = false;
       this.emit("close", this.peerIdHex);
-      this.destroy();
+      
+      // Try to reconnect if reconnectTimer is set and we haven't exceeded retries
+      if (this.reconnectTimer > 0 && this.currentRetry < this.retries) {
+        console.log(`Connection to ${this.peerIdHex.substring(0, 8)}... closed. Attempting reconnect in ${this.reconnectTimer}ms (retry ${this.currentRetry + 1}/${this.retries})`);
+        
+        this.currentRetry++;
+        this.reconnectTimeout = setTimeout(() => {
+          if (!this.destroyed) {
+            console.log(`Attempting to reconnect to ${this.peerIdHex.substring(0, 8)}...`);
+            // Recreate the peer with the same options
+            this._initialize();
+          }
+        }, this.reconnectTimer);
+      } else {
+        this.destroy();
+      }
     });
 
     this.peer.on("error", (err) => {
+      console.error(`Peer error with ${this.peerIdHex.substring(0, 8)}...`, err.message);
       this.emit("error", err, this.peerIdHex);
+      
+      // Handle ICE connection failures specifically
+      if (err.message && (
+          err.message.includes("Ice connection failed") ||
+          err.message.includes("ICE failed") ||
+          err.code === 'ERR_ICE_CONNECTION_FAILURE')) {
+        
+        console.log(`ICE connection failed with ${this.peerIdHex.substring(0, 8)}... Will retry if configured.`);
+        
+        // Force close and trigger reconnect logic
+        if (this.peer) {
+          this.peer.destroy();
+        }
+      }
     });
+    
+    // Set up ICE timeout if configured
+    if (this.iceCompleteTimeout > 0) {
+      this.iceTimeoutTimer = setTimeout(() => {
+        if (this.peer && !this.connected) {
+          console.log(`ICE connection timed out after ${this.iceCompleteTimeout}ms for peer ${this.peerIdHex.substring(0, 8)}...`);
+          
+          // Force close and trigger reconnect logic
+          this.peer.destroy();
+        }
+      }, this.iceCompleteTimeout);
+    }
   }
 
   /**
