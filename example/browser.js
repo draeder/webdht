@@ -16,8 +16,15 @@ let signalingSocket = null;
 async function initApp() {
   try {
     console.log("Creating WebDHT instance...");
-    // Create a WebDHT instance
-    const dht = new WebDHT();
+    // Create a WebDHT instance with signal batching and compression enabled
+    const dht = new WebDHT({
+      signalBatchInterval: 100, // Batch signals for 100ms
+      signalCompression: true,  // Enable signal compression
+      debug: true,              // Enable debug logging
+      dhtSignalThreshold: 2,    // Reduced from default 3 to 2
+      dhtRouteRefreshInterval: 15000, // Reduced from default 30s to 15s
+      aggressiveDiscovery: true // Always enable aggressive discovery
+    });
 
     // Set up the UI and event listeners once DHT is ready
     dht.on("ready", (nodeId) => {
@@ -31,6 +38,7 @@ async function initApp() {
       // Set up the UI with the DHT instance
       setupUI(dht);
       console.log("Your peer ID is:", nodeId);
+      console.log("Signal batching and compression enabled");
       
       // Set up periodic peer discovery through DHT
       setTimeout(() => {
@@ -48,7 +56,8 @@ async function initApp() {
 // Discover peers through the DHT and connect to them
 async function startDhtPeerDiscovery(dht) {
   // Only start discovery if we have at least one peer (bootstrap node)
-  if (dht.peers.size === 1) {
+  // We need at least one peer to use as a bootstrap node for DHT discovery
+  if (dht.peers.size < 1) {
     console.log("No peers connected yet, delaying DHT peer discovery");
     setTimeout(() => startDhtPeerDiscovery(dht), 5000);
     return;
@@ -79,7 +88,7 @@ async function startDhtPeerDiscovery(dht) {
       // Prioritize peers we're not already connected to
       const peersToConnect = uniquePeerIds
         .filter(peerId => !dht.peers.has(peerId))
-        .slice(0, 3); // Limit to 3 new connections per discovery cycle
+        .slice(0, 5); // Increased from 3 to 5 to establish more DHT connections
       
       console.log(`Attempting to connect to ${peersToConnect.length} new peers`);
       
@@ -117,7 +126,9 @@ async function startDhtPeerDiscovery(dht) {
   
   // Schedule next discovery
   // Use a shorter interval initially to build up the network faster
-  const nextInterval = dht.peers.size < 3 ? 30000 : 60000; // 30 seconds if we have few peers, otherwise 1 minute
+  // Reduce intervals to increase peer discovery frequency
+  // Reduce intervals to increase peer discovery frequency
+  const nextInterval = dht.peers.size < 3 ? 10000 : 30000; // 10 seconds if we have few peers, otherwise 30 seconds
   setTimeout(() => startDhtPeerDiscovery(dht), nextInterval);
 }
 
@@ -356,7 +367,6 @@ function connectToSignalingServer(dht, nodeId) {
           }
     
           // Pass the signal to our DHT
-          // NOTE: DHT.signal expects { id, signal } format, not { peerId, signal }
           try {
             console.log(
               `Processing signal from: ${data.peerId.substring(0, 8)}...`
@@ -365,35 +375,16 @@ function connectToSignalingServer(dht, nodeId) {
             // Detect if this is a WebRTC signaling message
             const isWebRTCSignal = data.signal && (data.signal.type === 'offer' || data.signal.type === 'answer' || data.signal.candidate);
             
-            // Only try to establish DHT routes for non-WebRTC signals or after connection is established
-            // This prevents WebRTC signaling state conflicts
-            if (!isWebRTCSignal && dht.peers.size > 2 && Math.random() < 0.5) { // Only 50% chance and only if we have more than 2 peers
-              console.log(`Establishing DHT route to ${data.peerId.substring(0, 8)}...`);
-              // Pass an initial signal path to prevent loops
-              dht._routeSignalThroughDHT(data.peerId, dht.nodeId, { type: "PING" }, 2, [dht.nodeId]);
+            // Implement the specific signaling flow:
+            // If we're receiving a signal via server, we should check if we're a bootstrap peer
+            const isBootstrapPeer = dht.peers.size >= 2;
+            
+            // If we're a bootstrap peer and this isn't WebRTC signaling, establish DHT routes
+            if (isBootstrapPeer && !isWebRTCSignal) {
+              console.log(`Bootstrap peer received signal from ${data.peerId.substring(0, 8)}..., will establish DHT routes`);
               
-              // Only use one other peer to establish routes to reduce traffic
-              const otherPeers = Array.from(dht.peers.keys())
-                .filter(id => id !== data.peerId && id !== dht.nodeId)
-                .slice(0, 1); // Limit to 1 other peer
-                
-              if (otherPeers.length > 0) {
-                const routePeerId = otherPeers[0];
-                const routePeer = dht.peers.get(routePeerId);
-                if (routePeer && routePeer.connected) {
-                  console.log(`Establishing additional DHT route to ${data.peerId.substring(0, 8)}... via ${routePeerId.substring(0, 8)}...`);
-                  routePeer.send({
-                    type: "SIGNAL",
-                    sender: dht.nodeId,
-                    originalSender: dht.nodeId,
-                    signal: { type: "PING" },
-                    target: data.peerId,
-                    ttl: 2,
-                    viaDht: true,
-                    signalPath: [dht.nodeId]
-                  });
-                }
-              }
+              // We'll let the DHT signal handler in dht.js handle the DHT routing
+              // It will establish routes between this new peer and other existing peers
             }
             
             // This is a server-routed signal since it came through the signaling server
@@ -472,125 +463,148 @@ function connectToSignalingServer(dht, nodeId) {
       const isWebRTCSignal = data.signal && (data.signal.type === 'offer' || data.signal.type === 'answer');
       const isICECandidate = data.signal && data.signal.candidate;
       
-      // For initial peers or WebRTC signaling, ALWAYS use the server
-      const peerCount = dht.peers.size;
-      const useServer = peerCount <= 2 || isWebRTCSignal;
+      // Implement the specific signaling flow:
+      // New Peer < - > Signaling Server < - > 1st discovered Existing Partial Mesh peer (bootstrap peer) < - > DHT Signaling < - > Other Existing Peers
       
-      // Try to route through DHT only for established connections and non-critical signals
-      let signalSent = false;
-      
-      if (!useServer && dht.peers.size > 0) {
-        try {
-          // First check if we can reach the target peer directly through the DHT
-          console.log(`Checking if peer ${targetPeerId.substr(0, 8)}... can be reached through DHT`);
-          
-          // If the peer is directly connected, send the signal directly - this is the most efficient path
-          if (dht.peers.has(targetPeerId)) {
-            console.log(`Peer ${targetPeerId.substr(0, 8)}... is directly connected, sending signal through DHT`);
-            
-            // Get the peer from our DHT
-            const directPeer = dht.peers.get(targetPeerId);
-            if (directPeer && directPeer.connected) {
-              console.log(`Sending signal directly through DHT to peer ${targetPeerId.substr(0, 8)}...`);
-              
-              // Send the signal directly through the peer connection
-              directPeer.send({
-                type: "SIGNAL",
-                sender: dht.nodeId,
-                originalSender: dht.nodeId,
-                signal: data.signal,
-                target: targetPeerId,
-                viaDht: true,  // Mark as DHT-routed
-                signalPath: [dht.nodeId] // Initialize signal path to prevent loops
-              });
-              
-              // Report this as a DHT signal to the server for statistics
-              if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
-                console.log("Reporting DHT signal to server:", dht.nodeId, "->", targetPeerId);
-                signalingSocket.send(
-                  JSON.stringify({
-                    type: "dht_signal_report",
-                    source: dht.nodeId,
-                    target: targetPeerId
-                  })
-                );
-              }
-              
-              // Mark as sent so we don't send it again through the server
-              signalSent = true;
-            } else {
-              console.log(`Peer ${targetPeerId.substr(0, 8)}... is in routing table but not directly connected`);
-            }
-          } else if (peerCount > 2) { // Only try routing through others if we have more than 2 peers
-            // For ICE candidates, use DHT 80% of the time
-            // For other non-WebRTC signals, use DHT 90% of the time
-            if ((isICECandidate && Math.random() < 0.8) || (!isICECandidate && !isWebRTCSignal && Math.random() < 0.9)) {
-              // Try to route the signal through the DHT network
-              console.log(`Peer ${targetPeerId.substr(0, 8)}... is not directly connected, trying to route through DHT`);
-              
-              // Find the closest peers to the target in our routing table
-              const closestPeers = Array.from(dht.peers.entries())
-                .filter(([peerId, peer]) => peer.connected)
-                .map(([peerId, peer]) => ({
-                  id: peerId,
-                  distance: dht._calculateDistance(peerId, targetPeerId)
-                }))
-                .sort((a, b) => a.distance < b.distance ? -1 : a.distance > b.distance ? 1 : 0)
-                .slice(0, 2); // Take up to 2 closest peers (reduced from 3 to limit traffic)
-              
-              if (closestPeers.length > 0) {
-                console.log(`Found ${closestPeers.length} potential routing peers for ${targetPeerId.substr(0, 8)}...`);
-                
-                // Only use one peer for routing to reduce traffic and prevent signaling conflicts
-                const { id: routePeerId } = closestPeers[0];
-                const routePeer = dht.peers.get(routePeerId);
-                
-                if (routePeer && routePeer.connected) {
-                  console.log(`Routing signal to ${targetPeerId.substr(0, 8)}... via ${routePeerId.substr(0, 8)}...`);
-                  
-                  // Send the signal through this peer for routing
-                  routePeer.send({
-                    type: "SIGNAL",
-                    sender: dht.nodeId,
-                    originalSender: dht.nodeId,
-                    signal: data.signal,
-                    target: targetPeerId,
-                    ttl: 3, // Time-to-live to prevent infinite routing
-                    viaDht: true,  // Mark as DHT-routed
-                    signalPath: [dht.nodeId] // Initialize signal path to prevent loops
-                  });
-                  
-                  // Report this as a DHT signal to the server for statistics
-                  if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
-                    console.log("Reporting DHT signal to server:", dht.nodeId, "->", targetPeerId);
-                    signalingSocket.send(
-                      JSON.stringify({
-                        type: "dht_signal_report",
-                        source: dht.nodeId,
-                        target: targetPeerId
-                      })
-                    );
-                  }
-                  
-                  signalSent = true;
-                }
-              } else {
-                console.log(`No suitable routing peers found for ${targetPeerId.substr(0, 8)}...`);
-              }
-            } else {
-              console.log(`Using server for WebRTC signal to ${targetPeerId.substr(0, 8)}... for reliability`);
-            }
-          }
-        } catch (err) {
-          console.warn("Error finding path through DHT:", err.message);
-        }
-      }
-      
-      // If we couldn't signal through the DHT, fall back to the signaling server
-      if (!signalSent) {
-        console.log("Using signaling server for:", targetPeerId.substr(0, 8) + "...");
+      // For WebRTC signaling, always use the server to ensure reliable connection establishment
+      if (isWebRTCSignal || isICECandidate) {
+        console.log(`Using server for WebRTC signal to ${targetPeerId.substr(0, 8)}...`);
         
         // Send the signal through our signaling server
+        signalingSocket.send(
+          JSON.stringify({
+            type: "signal",
+            target: targetPeerId,
+            signal: data.signal,
+          })
+        );
+        
+        // Report this as a server signal to the server for statistics
+        if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+          signalingSocket.send(
+            JSON.stringify({
+              type: "server_signal_report",
+              source: dht.nodeId,
+              target: targetPeerId
+            })
+          );
+        }
+        return;
+      }
+      
+      // Check if we're a new peer with few connections
+      // Increase the threshold from 1 to 2 to encourage more DHT signaling
+      const isNewPeer = dht.peers.size <= 2;
+      
+      if (isNewPeer) {
+        console.log(`New peer with ${dht.peers.size} connections using server to signal ${targetPeerId.substr(0, 8)}...`);
+        
+        // New peers always use the server to connect to their first bootstrap peer
+        signalingSocket.send(
+          JSON.stringify({
+            type: "signal",
+            target: targetPeerId,
+            signal: data.signal,
+          })
+        );
+        
+        // Report this as a server signal to the server for statistics
+        if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+          signalingSocket.send(
+            JSON.stringify({
+              type: "server_signal_report",
+              source: dht.nodeId,
+              target: targetPeerId
+            })
+          );
+        }
+        return;
+      }
+      
+      // For established peers, try to use DHT routing
+      let signalSent = false;
+      
+      try {
+        // If the peer is directly connected, send the signal directly
+        if (dht.peers.has(targetPeerId)) {
+          console.log(`Peer ${targetPeerId.substr(0, 8)}... is directly connected, sending signal through DHT`);
+          
+          // Get the peer from our DHT
+          const directPeer = dht.peers.get(targetPeerId);
+          if (directPeer && directPeer.connected) {
+            console.log(`Sending signal directly through DHT to peer ${targetPeerId.substr(0, 8)}...`);
+            
+            // Send the signal directly through the peer connection
+            directPeer.send({
+              type: "SIGNAL",
+              sender: dht.nodeId,
+              originalSender: dht.nodeId,
+              signal: data.signal,
+              target: targetPeerId,
+              viaDht: true,
+              signalPath: [dht.nodeId]
+            });
+            
+            // Report this as a DHT signal to the server for statistics
+            if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+              console.log("Reporting DHT signal to server:", dht.nodeId, "->", targetPeerId);
+              signalingSocket.send(
+                JSON.stringify({
+                  type: "dht_signal_report",
+                  source: dht.nodeId,
+                  target: targetPeerId
+                })
+              );
+            }
+            
+            signalSent = true;
+          }
+        } else {
+          // Find a bootstrap peer to route through
+          const connectedPeers = Array.from(dht.peers.entries())
+            .filter(([peerId, peer]) => peer.connected);
+            
+          if (connectedPeers.length > 0) {
+            // Use the first connected peer as the bootstrap peer
+            const [bootstrapPeerId, bootstrapPeer] = connectedPeers[0];
+            
+            console.log(`Routing signal to ${targetPeerId.substr(0, 8)}... via bootstrap peer ${bootstrapPeerId.substr(0, 8)}...`);
+            
+            // Send the signal through the bootstrap peer
+            bootstrapPeer.send({
+              type: "SIGNAL",
+              sender: dht.nodeId,
+              originalSender: dht.nodeId,
+              signal: data.signal,
+              target: targetPeerId,
+              ttl: 3,
+              viaDht: true,
+              signalPath: [dht.nodeId]
+            });
+            
+            // Report this as a DHT signal to the server for statistics
+            if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+              console.log("Reporting DHT signal to server:", dht.nodeId, "->", targetPeerId);
+              signalingSocket.send(
+                JSON.stringify({
+                  type: "dht_signal_report",
+                  source: dht.nodeId,
+                  target: targetPeerId
+                })
+              );
+            }
+            
+            signalSent = true;
+          }
+        }
+      } catch (err) {
+        console.warn("Error routing through DHT:", err.message);
+      }
+      
+      // Fall back to server only if DHT routing failed
+      if (!signalSent) {
+        console.log(`Falling back to server for signal to ${targetPeerId.substr(0, 8)}...`);
+        
         signalingSocket.send(
           JSON.stringify({
             type: "signal",

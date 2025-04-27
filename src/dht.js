@@ -273,7 +273,17 @@ class DHT extends EventEmitter {
       options.republishInterval || DEFAULT_REPUBLISH_INTERVAL;
     this.MAX_KEY_SIZE = options.maxKeySize || DEFAULT_MAX_KEY_SIZE;
     this.MAX_VALUE_SIZE = options.maxValueSize || DEFAULT_MAX_VALUE_SIZE;
-
+    
+    // DHT signaling optimization parameters
+    this.DHT_SIGNAL_THRESHOLD = options.dhtSignalThreshold || 2; // Reduced from 3 to 2
+    this.DHT_ROUTE_REFRESH_INTERVAL = options.dhtRouteRefreshInterval || 15000; // Reduced from 30s to 15s
+    this.AGGRESSIVE_DISCOVERY = true; // Always enable aggressive discovery
+    this.TIERED_ROUTING = options.tieredRouting !== false; // Enable tiered routing by default
+    
+    // Add diagnostic counters
+    this._dhtSignalAttempts = 0;
+    this._serverSignalAttempts = 0;
+    
     // Use async function and emit 'ready' event when done
     this._initialize(options);
   }
@@ -306,6 +316,10 @@ class DHT extends EventEmitter {
         maxStoreSize: this.MAX_STORE_SIZE,
         maxKeySize: this.MAX_KEY_SIZE,
         maxValueSize: this.MAX_VALUE_SIZE,
+        dhtSignalThreshold: this.DHT_SIGNAL_THRESHOLD,
+        dhtRouteRefreshInterval: this.DHT_ROUTE_REFRESH_INTERVAL,
+        aggressiveDiscovery: this.AGGRESSIVE_DISCOVERY,
+        tieredRouting: this.TIERED_ROUTING
       });
 
       // Initialize routing table (k-buckets) with configured K value
@@ -319,6 +333,12 @@ class DHT extends EventEmitter {
 
       // Initialize peer connections
       this.peers = new Map();
+      
+      // Track DHT signaling capabilities
+      this.dhtCapablePeers = new Map(); // peerId -> {successCount, lastSuccess, routes: Set()}
+      this.dhtRoutes = new Map(); // targetId -> Set(routePeerId)
+      this.dhtReadiness = false; // Whether this node is ready for DHT signaling
+      this.dhtReadinessTimestamp = 0; // When this node became DHT-ready
 
       // Message handlers
       this.messageHandlers = {
@@ -348,6 +368,9 @@ class DHT extends EventEmitter {
 
       // Emit ready event with the node ID
       this.emit("ready", this.nodeIdHex);
+      
+      // Start periodic DHT route refresh
+      this._setupDHTRouteRefresh();
     } catch (error) {
       console.error("Error initializing DHT node:", error);
       this.emit("error", error);
@@ -380,7 +403,181 @@ class DHT extends EventEmitter {
     this.republishInterval = setInterval(() => {
       this._republishData();
     }, this.REPUBLISH_INTERVAL);
+    
+    // Check DHT readiness periodically
+    setInterval(() => {
+      this._updateDHTReadiness();
+    }, 10000); // Check every 10 seconds
   }
+  
+  /**
+   * Update DHT readiness status based on connected DHT-capable peers
+   * @private
+   */
+  _updateDHTReadiness() {
+    // Skip if we checked recently
+    const now = Date.now();
+    if (now - this.dhtReadinessTimestamp < 5000) return; // Don't check more than once every 5 seconds
+    
+    // Count DHT-capable peers (peers that have successfully used DHT signaling)
+    const dhtCapablePeerCount = Array.from(this.dhtCapablePeers.values())
+      .filter(info => info.successCount >= this.DHT_SIGNAL_THRESHOLD)
+      .length;
+    
+    const wasReady = this.dhtReadiness;
+    
+    // Update DHT readiness based on number of DHT-capable peers
+    // Reduce threshold from 3 to 2 to make nodes DHT-ready sooner
+    this.dhtReadiness = dhtCapablePeerCount >= 2;
+    
+    // Log state change
+    if (this.dhtReadiness !== wasReady) {
+      this.dhtReadinessTimestamp = now;
+      if (this.dhtReadiness) {
+        this._logDebug(`Node is now DHT-ready with ${dhtCapablePeerCount} DHT-capable peers`);
+        this.emit('dht:ready', true);
+      } else {
+        this._logDebug(`Node is no longer DHT-ready, only ${dhtCapablePeerCount} DHT-capable peers`);
+        this.emit('dht:ready', false);
+      }
+    }
+  }
+  
+  /**
+   * Set up periodic DHT route refresh to maintain optimal routing paths
+   * @private
+   */
+  _setupDHTRouteRefresh() {
+    // Periodically refresh DHT routes to ensure optimal paths
+    this.dhtRouteRefreshInterval = setInterval(() => {
+      this._refreshDHTRoutes();
+    }, this.DHT_ROUTE_REFRESH_INTERVAL);
+  }
+  
+  /**
+   * Refresh DHT routes by testing and establishing new routes
+   * @private
+   */
+  async _refreshDHTRoutes() {
+    if (this.peers.size < 2) return; // Need at least 2 peers for routing
+    
+    this._logDebug("Refreshing DHT routes...");
+    
+    // Get all connected peers
+    const connectedPeers = Array.from(this.peers.entries())
+      .filter(([_, peer]) => peer.connected)
+      .map(([peerId, _]) => peerId);
+    
+    if (connectedPeers.length < 2) return;
+    
+    // Prioritize DHT-capable peers for route establishment
+    const dhtCapablePeerIds = Array.from(this.dhtCapablePeers.keys())
+      .filter(id => this.peers.has(id) && this.peers.get(id).connected);
+    
+    // Prioritize peers with more connections for tiered routing
+    const peerConnectionCounts = new Map();
+    
+    // Count connections for each peer
+    for (const peerId of connectedPeers) {
+      let connectionCount = 0;
+      
+      // Count direct connections
+      if (this.peers.has(peerId) && this.peers.get(peerId).connected) {
+        connectionCount++;
+      }
+      
+      // Count DHT routes
+      if (this.dhtRoutes.has(peerId)) {
+        connectionCount += this.dhtRoutes.get(peerId).size;
+      }
+      
+      peerConnectionCounts.set(peerId, connectionCount);
+    }
+    
+    // Sort peers by connection count (descending) for tiered routing
+    const sortedPeers = [...connectedPeers].sort((a, b) => {
+      const countA = peerConnectionCounts.get(a) || 0;
+      const countB = peerConnectionCounts.get(b) || 0;
+      return countB - countA; // Descending order
+    });
+    
+    // For each pair of peers, try to establish a route if one doesn't exist
+    // Prioritize routes between DHT-capable peers
+    for (let i = 0; i < sortedPeers.length; i++) {
+      const peerA = sortedPeers[i];
+      const isPeerADhtCapable = dhtCapablePeerIds.includes(peerA);
+      
+      for (let j = i + 1; j < sortedPeers.length; j++) {
+        const peerB = sortedPeers[j];
+        const isPeerBDhtCapable = dhtCapablePeerIds.includes(peerB);
+        
+        // Prioritize routes between DHT-capable peers
+        // Always try to establish routes between peers, even if they're not DHT-capable
+        // This helps increase DHT signaling by creating more potential routes
+        if (!isPeerADhtCapable && !isPeerBDhtCapable && !this.AGGRESSIVE_DISCOVERY) {
+          // Don't skip non-DHT-capable peer pairs anymore
+          this._logDebug(`Attempting route between non-DHT-capable peers ${peerA.substring(0, 8)}... and ${peerB.substring(0, 8)}...`);
+        }
+        
+        // Check if we already have a route between these peers
+        const routeExists =
+          (this.dhtRoutes.has(peerA) && this.dhtRoutes.get(peerA).has(peerB)) ||
+          (this.dhtRoutes.has(peerB) && this.dhtRoutes.get(peerB).has(peerA));
+        
+        if (!routeExists) {
+          // Try to establish a route between these peers
+          this._logDebug(`Attempting to establish DHT route between ${peerA.substring(0, 8)}... and ${peerB.substring(0, 8)}...`);
+          
+          // Choose which peer to route through based on connection count (tiered approach)
+          const routeFromA = peerConnectionCounts.get(peerA) >= peerConnectionCounts.get(peerB);
+          
+          if (routeFromA) {
+            // Route from A to B
+            const peerAObj = this.peers.get(peerA);
+            if (peerAObj && peerAObj.connected) {
+              peerAObj.send({
+                type: "SIGNAL",
+                sender: this.nodeIdHex,
+                originalSender: this.nodeIdHex,
+                signal: { type: "ROUTE_TEST", timestamp: Date.now() },
+                target: peerB,
+                ttl: 3,
+                viaDht: true,
+                signalPath: [this.nodeIdHex]
+              });
+            }
+          } else {
+            // Route from B to A
+            const peerBObj = this.peers.get(peerB);
+            if (peerBObj && peerBObj.connected) {
+              peerBObj.send({
+                type: "SIGNAL",
+                sender: this.nodeIdHex,
+                originalSender: this.nodeIdHex,
+                signal: { type: "ROUTE_TEST", timestamp: Date.now() },
+                target: peerA,
+                ttl: 3,
+                viaDht: true,
+                signalPath: [this.nodeIdHex]
+              });
+            }
+          }
+        }
+      }
+    }
+    
+    // Log current DHT routes
+    this._logDebug("Current DHT routes:");
+    for (const [targetId, routes] of this.dhtRoutes.entries()) {
+      this._logDebug(`- To ${targetId.substring(0, 8)}...: ${Array.from(routes).map(id => id.substring(0, 8) + '...').join(', ')}`);
+    }
+  }
+  
+  /**
+   * Update DHT readiness status based on successful DHT signals
+   * @private
+   */
+  // This is a duplicate method - removing it as it's already defined above
 
   /**
    * Get the appropriate bucket index for a node ID
@@ -447,6 +644,24 @@ class DHT extends EventEmitter {
    * @private
    */
   _shouldReplacePeer(newPeerId, existingPeerId) {
+    // Check if the new peer is DHT-capable
+    const isNewPeerDhtCapable = this.dhtCapablePeers.has(newPeerId) &&
+                               this.dhtCapablePeers.get(newPeerId).successCount >= this.DHT_SIGNAL_THRESHOLD;
+    
+    // Check if the existing peer is DHT-capable
+    const isExistingPeerDhtCapable = this.dhtCapablePeers.has(existingPeerId) &&
+                                    this.dhtCapablePeers.get(existingPeerId).successCount >= this.DHT_SIGNAL_THRESHOLD;
+    
+    // If one is DHT-capable and the other isn't, prioritize the DHT-capable one
+    if (isNewPeerDhtCapable && !isExistingPeerDhtCapable) {
+      return true; // Replace non-DHT-capable peer with DHT-capable one
+    }
+    
+    if (!isNewPeerDhtCapable && isExistingPeerDhtCapable) {
+      return false; // Don't replace DHT-capable peer with non-DHT-capable one
+    }
+    
+    // If both are DHT-capable or both are not, fall back to distance comparison
     const newDistance = this._calculateDistance(this.nodeIdHex, newPeerId);
     const existingDistance = this._calculateDistance(
       this.nodeIdHex,
@@ -586,13 +801,14 @@ class DHT extends EventEmitter {
         this._logDebug(`Establishing DHT routes for new peer ${peerId.substring(0, 8)}...`);
         
         // For each existing peer (except the new one), try to establish a DHT route to the new peer
-        // But only establish routes to a limited number of peers to reduce signaling traffic
+        // Establish routes to more peers to improve DHT connectivity
         const existingPeerEntries = Array.from(this.peers.entries())
           .filter(([existingPeerId, existingPeer]) =>
             existingPeerId !== peerId && existingPeer.connected);
         
-        // Only establish routes with up to 2 existing peers to reduce signaling traffic
-        const peersToRoute = existingPeerEntries.slice(0, 2);
+        // Increase the number of peers to establish routes with to improve DHT connectivity
+        // Use all available peers instead of just 3
+        const peersToRoute = existingPeerEntries;
         
         for (const [existingPeerId, existingPeer] of peersToRoute) {
           this._logDebug(`Establishing DHT route between ${existingPeerId.substring(0, 8)}... and ${peerId.substring(0, 8)}...`);
@@ -612,9 +828,8 @@ class DHT extends EventEmitter {
           if (discoveredPeers.length > 0) {
             this._logDebug(`Discovered ${discoveredPeers.length} additional peers through DHT after connecting to ${peerId.substring(0, 8)}...`);
             
-            // Connect to a smaller subset of discovered peers to avoid connection storms
-            // Only connect to one new peer at a time to reduce signaling traffic
-            for (let i = 0; i < Math.min(1, discoveredPeers.length); i++) {
+            // Connect to more discovered peers to improve DHT connectivity
+            for (let i = 0; i < Math.min(3, discoveredPeers.length); i++) {
               const discoveredPeerId = discoveredPeers[i];
               
               // Skip if we're already connected
@@ -650,31 +865,55 @@ class DHT extends EventEmitter {
       // Detect WebRTC signaling messages
       const isWebRTCSignal = data && (data.type === 'offer' || data.type === 'answer' || data.candidate);
       
-      // For initial peers or WebRTC signaling, ALWAYS use the server
-      const peerCount = this.peers.size;
-      const useServer = peerCount <= 2 || isWebRTCSignal;
-      
-      if (useServer) {
-        // For WebRTC signaling or initial peers, always emit directly to use the server
-        this._logDebug(`Using server for WebRTC signal or initial peer connection to ${peerId}`);
+      // For WebRTC signaling, always use the server to ensure reliable connection establishment
+      if (isWebRTCSignal) {
+        this._logDebug(`Using server for WebRTC signal to ${peerId}`);
+        this._serverSignalAttempts++;
+        this._logDebug(`Signal stats - DHT: ${this._dhtSignalAttempts}, Server: ${this._serverSignalAttempts}, Ratio: ${Math.round((this._dhtSignalAttempts / (this._dhtSignalAttempts + this._serverSignalAttempts)) * 100)}%`);
         this.emit("signal", { id: peerId, signal: data, viaDht: false });
         return;
       }
       
-      // For established connections and non-WebRTC signals, try DHT routing
-      if (this.peers.size > 2 && Math.random() < 0.8) { // 80% chance to try DHT routing
-        try {
-          // Find the closest peers to route through
-          const otherPeers = Array.from(this.peers.entries())
-            .filter(([id, p]) => id !== peerId && p.connected)
-            .slice(0, 2); // Take up to 2 peers
+      // Check if this is a new peer (one with no or few connections)
+      const isNewPeer = this.peers.size <= 1;
+      
+      // Check if we're DHT-ready
+      const isDHTReady = this.dhtReadiness;
+      
+      // New peers or non-DHT-ready peers use the server
+      if (isNewPeer || !isDHTReady) {
+        if (isNewPeer) {
+          this._logDebug(`New peer with ${this.peers.size} connections using server for signal to ${peerId}`);
+        } else {
+          this._logDebug(`Node not DHT-ready yet, using server for signal to ${peerId}`);
+        }
+        this._serverSignalAttempts++;
+        this._logDebug(`Signal stats - DHT: ${this._dhtSignalAttempts}, Server: ${this._serverSignalAttempts}, Ratio: ${Math.round((this._dhtSignalAttempts / (this._dhtSignalAttempts + this._serverSignalAttempts)) * 100)}%`);
+        this.emit("signal", { id: peerId, signal: data, viaDht: false });
+        return;
+      }
+      
+      // For established and DHT-ready peers, try to use DHT routing
+      try {
+        // Check if we have a known route to this peer
+        if (this.dhtRoutes.has(peerId) && this.dhtRoutes.get(peerId).size > 0) {
+          // Use a known route
+          const routes = Array.from(this.dhtRoutes.get(peerId));
+          
+          // Prioritize routes through DHT-capable peers
+          const dhtCapableRoutes = routes.filter(routeId =>
+            this.dhtCapablePeers.has(routeId) &&
+            this.dhtCapablePeers.get(routeId).successCount >= this.DHT_SIGNAL_THRESHOLD
+          );
+          
+          const routeToUse = dhtCapableRoutes.length > 0 ?
+            dhtCapableRoutes[Math.floor(Math.random() * dhtCapableRoutes.length)] : // Random DHT-capable route
+            routes[Math.floor(Math.random() * routes.length)]; // Random route if no DHT-capable ones
+          
+          const routePeer = this.peers.get(routeToUse);
+          if (routePeer && routePeer.connected) {
+            this._logDebug(`Using known DHT route to ${peerId.substring(0, 8)}... via ${routeToUse.substring(0, 8)}...`);
             
-          if (otherPeers.length > 0) {
-            this._logDebug(`Attempting to route signal to ${peerId} through DHT instead of emitting`);
-            
-            // Only use one peer for routing to reduce traffic
-            const [routePeerId, routePeer] = otherPeers[0];
-            this._logDebug(`Routing signal to ${peerId} via ${routePeerId}`);
             routePeer.send({
               type: "SIGNAL",
               sender: this.nodeIdHex,
@@ -686,15 +925,63 @@ class DHT extends EventEmitter {
               signalPath: [this.nodeIdHex]
             });
             
-            // Don't emit the signal event if we successfully routed through DHT
+            // Don't emit the signal event since we're routing through DHT
+            this._dhtSignalAttempts++;
+            this._logDebug(`Signal stats - DHT: ${this._dhtSignalAttempts}, Server: ${this._serverSignalAttempts}, Ratio: ${Math.round((this._dhtSignalAttempts / (this._dhtSignalAttempts + this._serverSignalAttempts)) * 100)}%`);
             return;
           }
-        } catch (err) {
-          this._logDebug(`Error routing signal through DHT: ${err.message}`);
         }
+        
+        // If no known route, find other peers to route through (excluding the target peer)
+        const otherPeers = Array.from(this.peers.entries())
+          .filter(([id, p]) => id !== peerId && p.connected);
+          
+        if (otherPeers.length > 0) {
+          // Prioritize DHT-capable peers for routing
+          const dhtCapablePeers = otherPeers.filter(([id, _]) =>
+            this.dhtCapablePeers.has(id) &&
+            this.dhtCapablePeers.get(id).successCount >= this.DHT_SIGNAL_THRESHOLD
+          );
+          
+          const peersToUse = dhtCapablePeers.length > 0 ? dhtCapablePeers : otherPeers;
+          
+          // Take up to 3 peers with aggressive discovery, 2 otherwise
+          const routingPeers = this.AGGRESSIVE_DISCOVERY ?
+            peersToUse.slice(0, 3) :
+            peersToUse.slice(0, 2);
+          
+          if (routingPeers.length > 0) {
+            this._logDebug(`Routing signal to ${peerId} through DHT using ${routingPeers.length} peers`);
+            
+            // Try multiple routing peers for better success rate
+            for (const [routePeerId, routePeer] of routingPeers) {
+              this._logDebug(`Routing signal to ${peerId} via peer ${routePeerId.substring(0, 8)}...`);
+              routePeer.send({
+                type: "SIGNAL",
+                sender: this.nodeIdHex,
+                originalSender: this.nodeIdHex,
+                signal: data,
+                target: peerId,
+                ttl: 3,
+                viaDht: true,
+                signalPath: [this.nodeIdHex]
+              });
+            }
+            
+            // Don't emit the signal event since we're routing through DHT
+            this._dhtSignalAttempts++;
+            this._logDebug(`Signal stats - DHT: ${this._dhtSignalAttempts}, Server: ${this._serverSignalAttempts}, Ratio: ${Math.round((this._dhtSignalAttempts / (this._dhtSignalAttempts + this._serverSignalAttempts)) * 100)}%`);
+            return;
+          }
+        }
+      } catch (err) {
+        this._logDebug(`Error routing signal through DHT: ${err.message}`);
       }
       
-      // Fall back to emitting the signal event if DHT routing failed or wasn't attempted
+      // Fall back to server only if DHT routing failed and we have no other option
+      this._logDebug(`Falling back to server for signal to ${peerId} (no DHT routes available)`);
+      this._serverSignalAttempts++;
+      this._logDebug(`Signal stats - DHT: ${this._dhtSignalAttempts}, Server: ${this._serverSignalAttempts}, Ratio: ${Math.round((this._dhtSignalAttempts / (this._dhtSignalAttempts + this._serverSignalAttempts)) * 100)}%`);
       this.emit("signal", { id: peerId, signal: data, viaDht: false });
     });
     
@@ -785,31 +1072,56 @@ class DHT extends EventEmitter {
       // Pass the signal to the peer
       peer.signal(data.signal);
       
-      // If this signal didn't come through the DHT, try to establish a DHT route for future signals
-      // But don't do this for WebRTC signaling or ICE candidates during initial connection
-      if (!viaDht && !isWebRTCSignal && !isIceCandidate && this.peers.size > 1 && Math.random() < 0.8) {
-        this._logDebug(`Received direct signal from ${peerId.substring(0, 8)}..., establishing DHT route for future signals`);
-        // Send a ping through the DHT to establish routing, with signal path tracking
-        this._routeSignalThroughDHT(peerId, this.nodeIdHex, { type: "PING" }, 2, [this.nodeIdHex]);
+      // Implement the specific signaling flow:
+      // If this is a bootstrap peer receiving a signal from a new peer via server,
+      // we should establish DHT routes to other peers
+      
+      // Only do this for non-WebRTC signals to avoid interfering with connection establishment
+      if (!viaDht && !isWebRTCSignal && !isIceCandidate) {
+        // Check if we're likely a bootstrap peer (we have multiple connections)
+        const isBootstrapPeer = this.peers.size > 2;
         
-        // Also try to establish routes through other peers to increase chances of success
-        const otherPeers = Array.from(this.peers.entries())
-          .filter(([id, p]) => id !== peerId && p.connected)
-          .slice(0, 2); // Limit to 2 other peers
+        if (isBootstrapPeer) {
+          this._logDebug(`Bootstrap peer received signal from ${peerId.substring(0, 8)}..., establishing DHT routes to other peers`);
           
-        for (const [routePeerId, routePeer] of otherPeers) {
-          if (routePeer && routePeer.connected) {
-            this._logDebug(`Establishing additional DHT route to ${peerId.substring(0, 8)}... via ${routePeerId.substring(0, 8)}...`);
-            routePeer.send({
-              type: "SIGNAL",
-              sender: this.nodeIdHex,
-              originalSender: this.nodeIdHex,
-              signal: { type: "PING" },
-              target: peerId,
-              ttl: 2,
-              viaDht: true,
-              signalPath: [this.nodeIdHex]
-            });
+          // Get other peers (excluding the one that just signaled us)
+          const otherPeers = Array.from(this.peers.entries())
+            .filter(([id, p]) => id !== peerId && p.connected);
+            
+          if (otherPeers.length > 0) {
+            // First, establish a DHT route back to the signaling peer
+            this._routeSignalThroughDHT(peerId, this.nodeIdHex, { type: "PING" }, 2, [this.nodeIdHex]);
+            
+            // Then, establish routes between this new peer and other existing peers
+            for (const [otherPeerId, otherPeer] of otherPeers) {
+              if (otherPeer && otherPeer.connected) {
+                this._logDebug(`Bootstrap peer establishing DHT route between ${peerId.substring(0, 8)}... and ${otherPeerId.substring(0, 8)}...`);
+                
+                // Send a signal to the other peer to connect to the new peer
+                otherPeer.send({
+                  type: "SIGNAL",
+                  sender: this.nodeIdHex,
+                  originalSender: peerId,
+                  signal: { type: "PING" },
+                  target: otherPeerId,
+                  ttl: 2,
+                  viaDht: true,
+                  signalPath: [this.nodeIdHex]
+                });
+                
+                // Also send a signal to the new peer to connect to the other peer
+                peer.send({
+                  type: "SIGNAL",
+                  sender: this.nodeIdHex,
+                  originalSender: otherPeerId,
+                  signal: { type: "PING" },
+                  target: peerId,
+                  ttl: 2,
+                  viaDht: true,
+                  signalPath: [this.nodeIdHex]
+                });
+              }
+            }
           }
         }
       }
@@ -853,34 +1165,56 @@ class DHT extends EventEmitter {
 
     // After establishing connection, try to discover more peers through this new peer
     peer.once("connect", async () => {
-      this._logDebug(`Connected to new peer ${peerId.substring(0, 8)}..., discovering more peers`);
+      this._logDebug(`Connected to new peer ${peerId.substring(0, 8)}..., implementing DHT signaling flow`);
       
-      // If this connection wasn't established through the DHT, try to establish DHT routes
-      // But only after the connection is fully established to avoid interfering with ICE
-      // Increase the probability to 80% to boost DHT signal percentage
-      if (!viaDht && Math.random() < 0.8 && peer.connected) { // Only if peer is fully connected
-        this._logDebug(`Connection to ${peerId.substring(0, 8)}... wasn't through DHT, establishing DHT routes`);
-        // Send a ping through the DHT to establish routing, with signal path tracking
-        this._routeSignalThroughDHT(peerId, this.nodeIdHex, { type: "PING" }, 2, [this.nodeIdHex]);
+      // Implement the specific signaling flow:
+      // If we're a new peer that just connected to a bootstrap peer via server,
+      // the bootstrap peer should help us connect to other peers via DHT
+      
+      // Check if we're likely a new peer (we have few connections)
+      const isNewPeer = this.peers.size <= 2;
+      
+      if (isNewPeer) {
+        this._logDebug(`New peer connected to bootstrap peer ${peerId.substring(0, 8)}..., waiting for DHT connections`);
+        // As a new peer, we don't initiate DHT connections - we wait for the bootstrap peer to do it
+      } else {
+        // We're likely a bootstrap peer that just connected to a new peer
+        this._logDebug(`Bootstrap peer connected to new peer ${peerId.substring(0, 8)}..., establishing DHT routes to other peers`);
         
-        // Also try to establish routes through other peers to increase chances of success
+        // Get other peers (excluding the one that just connected)
         const otherPeers = Array.from(this.peers.entries())
-          .filter(([id, p]) => id !== peerId && p.connected)
-          .slice(0, 2); // Limit to 2 other peers
+          .filter(([id, p]) => id !== peerId && p.connected);
           
-        for (const [routePeerId, routePeer] of otherPeers) {
-          if (routePeer && routePeer.connected) {
-            this._logDebug(`Establishing additional DHT route to ${peerId.substring(0, 8)}... via ${routePeerId.substring(0, 8)}...`);
-            routePeer.send({
-              type: "SIGNAL",
-              sender: this.nodeIdHex,
-              originalSender: this.nodeIdHex,
-              signal: { type: "PING" },
-              target: peerId,
-              ttl: 2,
-              viaDht: true,
-              signalPath: [this.nodeIdHex]
-            });
+        if (otherPeers.length > 0) {
+          // Establish routes between this new peer and other existing peers
+          for (const [otherPeerId, otherPeer] of otherPeers) {
+            if (otherPeer && otherPeer.connected) {
+              this._logDebug(`Bootstrap peer establishing DHT route between ${peerId.substring(0, 8)}... and ${otherPeerId.substring(0, 8)}...`);
+              
+              // Send a signal to the other peer to connect to the new peer
+              otherPeer.send({
+                type: "SIGNAL",
+                sender: this.nodeIdHex,
+                originalSender: peerId,
+                signal: { type: "PING" },
+                target: otherPeerId,
+                ttl: 2,
+                viaDht: true,
+                signalPath: [this.nodeIdHex]
+              });
+              
+              // Also send a signal to the new peer to connect to the other peer
+              peer.send({
+                type: "SIGNAL",
+                sender: this.nodeIdHex,
+                originalSender: otherPeerId,
+                signal: { type: "PING" },
+                target: peerId,
+                ttl: 2,
+                viaDht: true,
+                signalPath: [this.nodeIdHex]
+              });
+            }
           }
         }
       }
@@ -895,7 +1229,8 @@ class DHT extends EventEmitter {
             this._logDebug(`Discovered ${discoveredPeers.length} additional peers through DHT after connecting to ${peerId.substring(0, 8)}...`);
             
             // Connect to a subset of discovered peers to avoid connection storms
-            for (let i = 0; i < Math.min(3, discoveredPeers.length); i++) {
+            // Connect to more discovered peers to improve DHT connectivity
+            for (let i = 0; i < Math.min(4, discoveredPeers.length); i++) {
               const discoveredPeerId = discoveredPeers[i];
               
               // Skip if we're already connected
@@ -968,6 +1303,18 @@ class DHT extends EventEmitter {
     for (let i = 0; i < this.BUCKET_COUNT; i++) {
       nodes = nodes.concat(this.buckets[i].nodes);
     }
+    
+    // Filter to only include connected peers (except self)
+    const seen = new Set();
+    nodes = nodes.filter((n) => {
+      const nIdHex = typeof n.id === "string" ? n.id : bufferToHex(n.id);
+      if (seen.has(nIdHex)) return false;
+      seen.add(nIdHex);
+      // Only include connected peers (except self)
+      if (nIdHex === this.nodeIdHex) return false;
+      const peer = this.peers.get(nIdHex);
+      return peer && peer.connected;
+    });
 
     nodes = nodes
       .sort((a, b) => {
@@ -1236,27 +1583,72 @@ class DHT extends EventEmitter {
       // Log whether this signal came through the DHT or not
       if (isDhtRouted) {
         this._logDebug(`Signal from ${originalSender.substring(0, 8)}... was routed through the DHT`);
+        
+        // Track successful DHT signal routing
+        if (!this.dhtCapablePeers.has(originalSender)) {
+          this.dhtCapablePeers.set(originalSender, {
+            successCount: 1,
+            lastSuccess: Date.now(),
+            routes: new Set(signalPath.filter(id => id !== this.nodeIdHex && id !== originalSender))
+          });
+        } else {
+          const peerInfo = this.dhtCapablePeers.get(originalSender);
+          peerInfo.successCount++;
+          peerInfo.lastSuccess = Date.now();
+          
+          // Add any new routes we've discovered
+          signalPath.forEach(id => {
+            if (id !== this.nodeIdHex && id !== originalSender) {
+              peerInfo.routes.add(id);
+            }
+          });
+        }
+        
+        // Update DHT routes
+        if (!this.dhtRoutes.has(originalSender)) {
+          this.dhtRoutes.set(originalSender, new Set());
+        }
+        
+        // Add the last hop as a direct route
+        if (signalPath.length > 0) {
+          const lastHop = signalPath[signalPath.length - 1];
+          if (lastHop !== this.nodeIdHex && lastHop !== originalSender) {
+            this.dhtRoutes.get(originalSender).add(lastHop);
+          }
+        }
+        
+        // Check if we should update DHT readiness
+        this._updateDHTReadiness();
       } else {
         this._logDebug(`Signal from ${originalSender.substring(0, 8)}... came directly (not through DHT)`);
       }
       
       // Emit the signal event with additional metadata to indicate if it was DHT-routed
-      this.emit("signal", {
-        id: originalSender,
-        signal: signal,
-        viaDht: isDhtRouted
-      });
+      // Use batching for the response if appropriate
+      if (this.SIGNAL_BATCH_INTERVAL > 0) {
+        this._batchSignal(originalSender, signal, isDhtRouted);
+      } else {
+        this.emit("signal", {
+          id: originalSender,
+          signal: signal,
+          viaDht: isDhtRouted
+        });
+      }
     }
     // If the target is another peer, forward the signal
     else if (this.peers.has(targetId)) {
       this._logDebug(`Forwarding signal from ${originalSender.substring(0, 8)}... to ${targetId.substring(0, 8)}...`);
       const targetPeer = this.peers.get(targetId);
       if (targetPeer && targetPeer.connected) {
+        // Compress the signal if enabled
+        const signalToSend = this.SIGNAL_COMPRESSION_ENABLED ?
+          this._compressSignal(signal) : signal;
+          
         targetPeer.send({
           type: "SIGNAL",
           sender: peerId,
           originalSender: originalSender,
-          signal: signal,
+          signal: signalToSend,
           target: targetId,
           viaDht: true,  // Mark as DHT-routed
           ttl: ttl - 1,  // Decrement TTL
@@ -1287,7 +1679,73 @@ class DHT extends EventEmitter {
         return;
       }
       
-      // Find the closest nodes to the target
+      // Check if we have a known direct route to the target
+      if (this.dhtRoutes.has(targetId) && this.dhtRoutes.get(targetId).size > 0) {
+        const knownRoutes = Array.from(this.dhtRoutes.get(targetId));
+        
+        // Prioritize DHT-capable peers for routing
+        const dhtCapableRoutes = knownRoutes.filter(routeId =>
+          this.dhtCapablePeers.has(routeId) &&
+          this.dhtCapablePeers.get(routeId).successCount >= this.DHT_SIGNAL_THRESHOLD &&
+          !signalPath.includes(routeId) // Avoid loops
+        );
+        if (dhtCapableRoutes.length > 0) {
+          // Use a known DHT-capable route
+          const routeId = dhtCapableRoutes[Math.floor(Math.random() * dhtCapableRoutes.length)];
+          const routePeer = this.peers.get(routeId);
+          
+          if (routePeer && routePeer.connected) {
+            this._logDebug(`Using known DHT-capable route to ${targetId.substring(0, 8)}... via ${routeId.substring(0, 8)}...`);
+              
+            routePeer.send({
+              type: "SIGNAL",
+              sender: this.nodeIdHex,
+              originalSender: senderId,
+              signal: signalToSend,
+              target: targetId,
+              ttl: ttl,
+              viaDht: true,
+              signalPath: [...signalPath, this.nodeIdHex]
+            });
+            
+            return; // Successfully routed through known DHT-capable peer
+          }
+        }
+        
+        // If no DHT-capable routes, try any known route
+        const availableRoutes = knownRoutes.filter(routeId =>
+          !signalPath.includes(routeId) && // Avoid loops
+          this.peers.has(routeId) &&
+          this.peers.get(routeId).connected
+        );
+        
+        if (availableRoutes.length > 0) {
+          // Use a known route
+          const routeId = availableRoutes[Math.floor(Math.random() * availableRoutes.length)];
+          const routePeer = this.peers.get(routeId);
+          
+          this._logDebug(`Using known route to ${targetId.substring(0, 8)}... via ${routeId.substring(0, 8)}...`);
+          
+          // Compress the signal if enabled
+          const signalToSend = this.SIGNAL_COMPRESSION_ENABLED ?
+            this._compressSignal(signal) : signal;
+            
+          routePeer.send({
+            type: "SIGNAL",
+            sender: this.nodeIdHex,
+            originalSender: senderId,
+            signal: signalToSend,
+            target: targetId,
+            ttl: ttl,
+            viaDht: true,
+            signalPath: [...signalPath, this.nodeIdHex]
+          });
+          
+          return; // Successfully routed through known peer
+        }
+      }
+      
+      // If no known routes, find the closest nodes to the target
       this._logDebug(`Finding closest nodes to ${targetId.substring(0, 8)}... for routing signal (TTL: ${ttl})`);
       
       // Get all nodes from our buckets
@@ -1309,13 +1767,6 @@ class DHT extends EventEmitter {
           
           const peer = this.peers.get(nodeIdHex);
           return peer && peer.connected;
-        })
-        .sort((a, b) => {
-          const aId = typeof a.id === "string" ? a.id : bufferToHex(a.id);
-          const bId = typeof b.id === "string" ? b.id : bufferToHex(b.id);
-          const distA = this._calculateDistance(aId, targetId);
-          const distB = this._calculateDistance(bId, targetId);
-          return distA < distB ? -1 : distA > distB ? 1 : 0;
         });
       
       if (connectedNodes.length === 0) {
@@ -1323,26 +1774,60 @@ class DHT extends EventEmitter {
         return;
       }
       
-      // Take up to 5 nodes (increased from 3) to improve routing success rate
-      const closestNodes = connectedNodes.slice(0, 5);
+      // Prioritize DHT-capable peers
+      const dhtCapableNodes = connectedNodes.filter(node => {
+        const nodeIdHex = typeof node.id === "string" ? node.id : bufferToHex(node.id);
+        return this.dhtCapablePeers.has(nodeIdHex) &&
+               this.dhtCapablePeers.get(nodeIdHex).successCount >= this.DHT_SIGNAL_THRESHOLD;
+      });
       
-      // Forward the signal to each of the closest nodes
-      for (const node of closestNodes) {
+      // Sort nodes by distance to target
+      const sortByDistance = nodes => nodes.sort((a, b) => {
+        const aId = typeof a.id === "string" ? a.id : bufferToHex(a.id);
+        const bId = typeof b.id === "string" ? b.id : bufferToHex(b.id);
+        const distA = this._calculateDistance(aId, targetId);
+        const distB = this._calculateDistance(bId, targetId);
+        return distA < distB ? -1 : distA > distB ? 1 : 0;
+      });
+      
+      // Sort both node lists by distance
+      const sortedDhtCapableNodes = sortByDistance(dhtCapableNodes);
+      const sortedRegularNodes = sortByDistance(connectedNodes);
+      
+      // Determine how many nodes to route through based on DHT readiness and aggressive discovery
+      const routeCount = this.AGGRESSIVE_DISCOVERY ?
+        (this.dhtReadiness ? 3 : 5) : // More aggressive when not DHT-ready
+        (this.dhtReadiness ? 2 : 3);  // Less aggressive when DHT-ready
+      
+      // Prefer DHT-capable nodes, but fall back to regular nodes if needed
+      const nodesToUse = sortedDhtCapableNodes.length >= routeCount ?
+        sortedDhtCapableNodes.slice(0, routeCount) :
+        [...sortedDhtCapableNodes, ...sortedRegularNodes.slice(0, routeCount - sortedDhtCapableNodes.length)];
+      
+      // Forward the signal to each selected node
+      for (const node of nodesToUse) {
         const nodeIdHex = typeof node.id === "string" ? node.id : bufferToHex(node.id);
         const peer = this.peers.get(nodeIdHex);
         
         if (peer && peer.connected) {
-          this._logDebug(`Routing signal from ${senderId.substring(0, 8)}... to ${targetId.substring(0, 8)}... via ${nodeIdHex.substring(0, 8)}... (TTL: ${ttl})`);
+          const isDhtCapable = this.dhtCapablePeers.has(nodeIdHex) &&
+                              this.dhtCapablePeers.get(nodeIdHex).successCount >= this.DHT_SIGNAL_THRESHOLD;
           
+          this._logDebug(`Routing signal from ${senderId.substring(0, 8)}... to ${targetId.substring(0, 8)}... via ${nodeIdHex.substring(0, 8)}... (${isDhtCapable ? 'DHT-capable' : 'regular'}, TTL: ${ttl})`);
+          
+          // Compress the signal if enabled
+          const signalToSend = this.SIGNAL_COMPRESSION_ENABLED ?
+            this._compressSignal(signal) : signal;
+            
           peer.send({
             type: "SIGNAL",
             sender: this.nodeIdHex,
             originalSender: senderId,
-            signal: signal,
+            signal: signalToSend,
             target: targetId,
-            ttl: ttl, // Pass the decremented TTL
-            viaDht: true, // Mark as DHT-routed
-            signalPath: signalPath // Include the signal path to prevent loops
+            ttl: ttl,
+            viaDht: true,
+            signalPath: [...signalPath, this.nodeIdHex]
           });
         }
       }
@@ -1620,12 +2105,24 @@ class DHT extends EventEmitter {
       ? key
       : bufferToHex(await sha1(key));
 
+    this._logDebug(`get - Looking up key: ${key}, hash: ${keyHashHex}`);
+
     // Check local storage first
     if (this.storage.has(keyHashHex)) {
       const storedData = this.storage.get(keyHashHex);
       // Return just the value, not the metadata
-      return storedData.value;
+      if (storedData.value !== undefined) {
+        this._logDebug(`get - Found value in local storage for key: ${key}`);
+        return storedData.value;
+      } else {
+        this._logDebug(`get - Found undefined value in local storage for key: ${key}, removing invalid entry`);
+        // Remove invalid entry
+        this.storage.delete(keyHashHex);
+        this.storageTimestamps.delete(keyHashHex);
+      }
     }
+
+    this._logDebug(`get - Value not found locally, querying DHT for key: ${key}`);
 
     // Find closest nodes to the key
     const keyBuffer = hexToBuffer(keyHashHex);
@@ -1647,22 +2144,39 @@ class DHT extends EventEmitter {
       })
       .slice(0, this.K);
 
+    this._logDebug(`get - Found ${closestNodes.length} nodes to query for key: ${key}`);
+
     // Query nodes in parallel with timeout
     const queryNode = async (node) => {
       const nodeIdHex =
         typeof node.id === "string" ? node.id : bufferToHex(node.id);
       const peer = this.peers.get(nodeIdHex);
 
-      if (!peer || !peer.connected) return null;
+      if (!peer || !peer.connected) {
+        this._logDebug(`get - Peer ${nodeIdHex.substring(0, 8)}... not connected, skipping`);
+        return null;
+      }
+
+      this._logDebug(`get - Querying peer ${nodeIdHex.substring(0, 8)}... for key: ${key}`);
 
       return new Promise((resolve) => {
-        const timeout = setTimeout(() => resolve(null), 5000); // 5s timeout
+        const timeout = setTimeout(() => {
+          this._logDebug(`get - Timeout querying peer ${nodeIdHex.substring(0, 8)}... for key: ${key}`);
+          resolve(null);
+        }, 5000); // 5s timeout
 
         const messageHandler = (msg) => {
           if (msg.type === "FIND_VALUE_RESPONSE" && msg.key === keyHashHex) {
             clearTimeout(timeout);
             peer.removeListener("message", messageHandler);
-            resolve(msg.value);
+            
+            if (msg.value === undefined) {
+              this._logDebug(`get - Peer ${nodeIdHex.substring(0, 8)}... returned undefined for key: ${key}`);
+              resolve(null);
+            } else {
+              this._logDebug(`get - Peer ${nodeIdHex.substring(0, 8)}... returned value for key: ${key}`);
+              resolve(msg.value);
+            }
           }
         };
 
@@ -1680,9 +2194,10 @@ class DHT extends EventEmitter {
 
     // Return first non-null result
     for (const result of results) {
-      if (result !== null) {
+      if (result !== null && result !== undefined) {
         // Store result locally for future use with metadata structure
         const timestamp = Date.now();
+        this._logDebug(`get - Found value for key: ${key}, storing locally`);
         this.storage.set(keyHashHex, {
           value: result,
           timestamp,
@@ -1693,6 +2208,7 @@ class DHT extends EventEmitter {
       }
     }
 
+    this._logDebug(`get - No value found for key: ${key} in DHT`);
     return null;
   }
 
@@ -1809,8 +2325,28 @@ class DHT extends EventEmitter {
     // Then, find nodes close to our own ID to get peers that should be in our routing table
     const closeSelfNodes = await this.findNode(this.nodeId);
     
+    // If we're DHT-ready, also find nodes close to some of our DHT-capable peers
+    // to improve the DHT mesh connectivity
+    let dhtCapableNodes = [];
+    if (this.dhtReadiness && this.dhtCapablePeers.size > 0) {
+      // Get up to 3 DHT-capable peers
+      const dhtCapablePeerIds = Array.from(this.dhtCapablePeers.keys())
+        .filter(id => this.dhtCapablePeers.get(id).successCount >= this.DHT_SIGNAL_THRESHOLD)
+        .slice(0, 3);
+      
+      // Find nodes close to each DHT-capable peer
+      for (const peerId of dhtCapablePeerIds) {
+        try {
+          const peerNodes = await this.findNode(peerId);
+          dhtCapableNodes = [...dhtCapableNodes, ...peerNodes];
+        } catch (err) {
+          this._logDebug(`Error finding nodes close to DHT-capable peer ${peerId.substring(0, 8)}...: ${err.message}`);
+        }
+      }
+    }
+    
     // Combine the results, removing duplicates
-    const allNodes = [...discoveredNodes, ...closeSelfNodes];
+    const allNodes = [...discoveredNodes, ...closeSelfNodes, ...dhtCapableNodes];
     const uniqueNodes = [];
     const seenIds = new Set();
     
@@ -1818,21 +2354,40 @@ class DHT extends EventEmitter {
       const nodeIdHex = typeof node.id === "string" ? node.id : bufferToHex(node.id);
       if (!seenIds.has(nodeIdHex) && nodeIdHex !== this.nodeIdHex) {
         seenIds.add(nodeIdHex);
-        uniqueNodes.push(node);
+        uniqueNodes.push({
+          ...node,
+          isDhtCapable: this.dhtCapablePeers.has(nodeIdHex) &&
+                        this.dhtCapablePeers.get(nodeIdHex).successCount >= this.DHT_SIGNAL_THRESHOLD
+        });
       }
     }
     
-    // Sort by XOR distance to our node ID and take the requested count
-    const sortedNodes = uniqueNodes
-      .sort((a, b) => {
-        const distA = distance(a.id, this.nodeId);
-        const distB = distance(b.id, this.nodeId);
-        return compareBuffers(distA, distB);
-      })
-      .slice(0, count);
+    // First prioritize DHT-capable peers
+    const dhtCapablePeers = uniqueNodes.filter(node => node.isDhtCapable);
+    const regularPeers = uniqueNodes.filter(node => !node.isDhtCapable);
     
-    this._logDebug(`Discovered ${sortedNodes.length} peers through DHT`);
-    return sortedNodes.map(node => typeof node.id === "string" ? node.id : bufferToHex(node.id));
+    // Sort each group by XOR distance to our node ID
+    const sortByDistance = nodes => nodes.sort((a, b) => {
+      const distA = distance(a.id, this.nodeId);
+      const distB = distance(b.id, this.nodeId);
+      return compareBuffers(distA, distB);
+    });
+    
+    const sortedDhtCapablePeers = sortByDistance(dhtCapablePeers);
+    const sortedRegularPeers = sortByDistance(regularPeers);
+    
+    // Combine the sorted lists, prioritizing DHT-capable peers
+    // Take all DHT-capable peers first, then fill remaining slots with regular peers
+    const dhtPeersToTake = Math.min(sortedDhtCapablePeers.length, count);
+    const regularPeersToTake = Math.min(sortedRegularPeers.length, count - dhtPeersToTake);
+    
+    const resultNodes = [
+      ...sortedDhtCapablePeers.slice(0, dhtPeersToTake),
+      ...sortedRegularPeers.slice(0, regularPeersToTake)
+    ];
+    
+    this._logDebug(`Discovered ${resultNodes.length} peers through DHT (${dhtPeersToTake} DHT-capable)`);
+    return resultNodes.map(node => typeof node.id === "string" ? node.id : bufferToHex(node.id));
   }
   
   /**

@@ -202,8 +202,11 @@ wss.on("connection", (ws) => {
             connectionStats.signalCount++;
             
             // All signals through the server are counted as server signals
-            stats.serverSignalCount++;
-            connectionStats.serverSignalCount++;
+            stats.serverSignalCount = (stats.serverSignalCount || 0) + 1;
+            connectionStats.serverSignalCount = (connectionStats.serverSignalCount || 0) + 1;
+            
+            // Log signal counts for monitoring
+            console.log(`Signal counts for ${peerId}: DHT=${stats.dhtSignalCount || 0}, Server=${stats.serverSignalCount || 0}, Ratio=${Math.round(((stats.dhtSignalCount || 0) / stats.signalCount) * 100)}%`);
           }
         }
 
@@ -324,8 +327,11 @@ setInterval(() => {
     console.log("\nTotals:");
     console.log(`- Total bytes transferred: ${totalBytes}`);
     console.log(`- Total signals: ${totalSignals}`);
-    console.log(`- DHT signals: ${totalDhtSignals} (${Math.round(totalDhtSignals/totalSignals*100 || 0)}%)`);
-    console.log(`- Server signals: ${totalServerSignals} (${Math.round(totalServerSignals/totalSignals*100 || 0)}%)`);
+    const dhtPercentage = totalSignals > 0 ? Math.round((totalDhtSignals/totalSignals)*100) : 0;
+    const serverPercentage = totalSignals > 0 ? Math.round((totalServerSignals/totalSignals)*100) : 0;
+    console.log(`- DHT signals: ${totalDhtSignals} (${dhtPercentage}%)`);
+    console.log(`- Server signals: ${totalServerSignals} (${serverPercentage}%)`);
+    console.log(`- Signal ratio: ${dhtPercentage}% DHT / ${serverPercentage}% server`);
     console.log(`- Average bytes per peer: ${Math.round(totalBytes / peers.size)}`);
     console.log(`- Average signals per peer: ${Math.round(totalSignals / peers.size)}`);
     console.log("--------------------------------\n");
