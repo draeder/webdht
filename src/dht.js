@@ -1060,14 +1060,24 @@ class DHT extends EventEmitter {
 
     const peerId = data.id;
     const viaDht = data.viaDht || false;
+    // Check if trickle ICE is disabled in our options
+    const isTrickleDisabled = this.simplePeerOptions && this.simplePeerOptions.trickle === false;
+
+    // Check if this is an ICE candidate or WebRTC signaling message
+    const isIceCandidate = data.signal && data.signal.candidate;
+    const isWebRTCSignal = data.signal && (data.signal.type === 'offer' || data.signal.type === 'answer');
+
+    // When trickle is disabled, we should receive fewer ICE candidates
+    // Log unexpected ICE candidates for debugging
+    if (isTrickleDisabled && isIceCandidate) {
+      this._logDebug(`Warning: Received ICE candidate with trickle disabled from ${peerId.substring(0, 8)}...`);
+    } else {
+      this._logDebug(`Received signal ${isWebRTCSignal ? data.signal.type : (isIceCandidate ? 'ICE' : 'unknown')} from ${peerId.substring(0, 8)}..., via ${viaDht ? 'DHT' : 'server'}`);
+    }
 
     // Check if we know this peer
     if (this.peers.has(peerId)) {
       const peer = this.peers.get(peerId);
-      
-      // Check if this is an ICE candidate or WebRTC signaling message
-      const isIceCandidate = data.signal && data.signal.candidate;
-      const isWebRTCSignal = data.signal && (data.signal.type === 'offer' || data.signal.type === 'answer');
       
       // Pass the signal to the peer
       peer.signal(data.signal);

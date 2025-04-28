@@ -15,7 +15,7 @@ const __dirname = path.dirname(__filename);
 
 // Create Express app
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 
 // Enable JSON parsing for API endpoints
 app.use(express.json());
