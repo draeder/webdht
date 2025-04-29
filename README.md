@@ -20,6 +20,13 @@ WebDHT implements a Kademlia-like Distributed Hash Table with the following comp
 - **K-Buckets**: Store routing information for Kademlia
 - **SHA1**: Custom SHA1 implementation that works in both environments
 
+The DHT class is the main entry point for using the library. It manages the node's ID, routing table (K-Buckets), and peer connections. When a new DHT instance is created, it generates a random node ID using the SHA1 implementation and initializes the K-Buckets.
+
+The Peer class is a wrapper around the simple-peer library, providing a simplified interface for establishing WebRTC connections between nodes. It handles the signaling process and manages the underlying WebRTC connection.
+
+The K-Buckets class implements the Kademlia routing table, storing information about other nodes in the network. It uses the XOR distance metric to determine the proximity of nodes and efficiently routes messages to the closest nodes.
+
+The SHA1 class provides a custom implementation of the SHA1 hashing algorithm that works in both browser and Node.js environments. It is used to generate node IDs and hash keys for the DHT.
 
 ## Advanced Usage & Exports
 
@@ -34,6 +41,81 @@ Example:
 
 ```javascript
 import WebDHT, { Peer, utils, sha1, generateRandomId, bufferToHex, hexToBuffer } from 'webdht';
+```
+
+The `Peer` class can be used directly to establish WebRTC connections between nodes without using the full DHT implementation. This can be useful for building custom peer-to-peer applications or integrating WebDHT with other libraries.
+
+The `utils` module provides utility functions for working with buffers and converting between different data formats. These functions can be used to manipulate data before storing it in the DHT or after retrieving it.
+
+The `sha1` and `generateRandomId` functions can be used to generate SHA1 hashes and random IDs, respectively. These can be useful for creating custom node IDs or hashing keys for the DHT.
+
+The `bufferToHex` and `hexToBuffer` functions provide helpers for converting between buffers and hexadecimal strings. These can be useful for working with data in different formats or for debugging purposes.
+
+## API.js Usage
+
+The `api.js` file provides a consolidated API for WebDHT operations, peer discovery, and signaling. It handles both browser and Node.js environments. The key functions are:
+
+1. **initializeApi(dht, adapter)**: Initializes the API manager with a DHT instance and UI adapter. It sets up event listeners for signal events, peer connections, and disconnections.
+
+2. **connectSignaling(url, options)**: Connects to the signaling server using a WebSocket URL. It handles registration, new peer notifications, and signal forwarding.
+
+3. **connectPeer(peerId, forceInitiator, additionalOptions)**: Initiates a connection to a peer. It uses lexicographical comparison to determine who initiates the connection and sets up event listeners for the peer.
+
+4. **putValue(key, value)**: Stores a value in the DHT.
+
+5. **getValue(key)**: Retrieves a value from the DHT.
+
+6. **startDiscovery(initialDelay)**: Starts the peer discovery process with an initial delay.
+
+7. **connectToPeer(peerId)**: Connects to a peer using the DHT instance.
+
+8. **sendMessageToPeer(peerId, messageText)**: Sends a message to a connected peer.
+
+9. **startDhtPeerDiscovery()**: Starts the DHT peer discovery process.
+
+10. **stopDhtPeerDiscovery()**: Stops the DHT peer discovery process.
+
+Example usage:
+
+```javascript
+import { initializeApi, connectSignaling, connectPeer, putValue, getValue, startDiscovery, connectToPeer, sendMessageToPeer, startDhtPeerDiscovery, stopDhtPeerDiscovery } from 'webdht/api';
+
+// Initialize the API
+const dht = new WebDHT();
+const adapter = {
+  updateStatus: (message, isError = false) => console.log(isError ? `ERROR: ${message}` : `Status: ${message}`),
+  updatePeerList: (peerIds) => console.log("Available peers:", peerIds),
+  addMessage: (peerId, message, isOutgoing) => console.log(`Message ${isOutgoing ? 'to' : 'from'} ${peerId.substring(0,8)}: ${message}`),
+  getWebSocket: (url) => new WebSocket(url) // Browser default
+};
+initializeApi(dht, adapter);
+
+// Connect to the signaling server
+connectSignaling('wss://signaling.example.com');
+
+// Connect to a peer
+connectPeer('peer-id-123');
+
+// Store a value in the DHT
+putValue('my-key', 'my-value');
+
+// Retrieve a value from the DHT
+getValue('my-key').then(value => console.log('Retrieved value:', value));
+
+// Start peer discovery
+startDiscovery();
+
+// Connect to a peer using the DHT instance
+connectToPeer('peer-id-456');
+
+// Send a message to a connected peer
+sendMessageToPeer('peer-id-789', 'Hello, peer!');
+
+// Start DHT peer discovery
+startDhtPeerDiscovery();
+
+// Stop DHT peer discovery
+stopDhtPeerDiscovery();
 ```
 
 ## Installation
