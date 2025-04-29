@@ -49,8 +49,46 @@ function cacheUIElements() {
 
 // UI Adapter for api.js
 const browserUiAdapter = {
+  // Track last status message to prevent duplicates
+  lastStatusMessage: "",
+  lastDiscoveryCount: 0,
+  // Keep track of repetitive discovery messages
+  discoveryInProgress: false,
   updateStatus: (message, isError = false) => {
     if (!uiElements.status) return;
+    
+    // Handle "Discovering peers through DHT..." message
+    if (message === "Discovering peers through DHT...") {
+      if (browserUiAdapter.discoveryInProgress) {
+        return; // Skip repeated discovery-in-progress messages
+      }
+      browserUiAdapter.discoveryInProgress = true;
+    } else if (message.includes("Discovered") && message.includes("unique peers through DHT")) {
+      // Reset discovery in progress flag when discovery result is shown
+      browserUiAdapter.discoveryInProgress = false;
+      
+      // Extract the number from "Discovered X unique peers through DHT"
+      const match = message.match(/Discovered (\d+) unique peers through DHT/);
+      if (match) {
+        const count = parseInt(match[1]);
+        // Only show the message if the count changed
+        if (count === browserUiAdapter.lastDiscoveryCount) {
+          return; // Skip duplicate discovery result message
+        }
+        browserUiAdapter.lastDiscoveryCount = count;
+      }
+    } else {
+      // Any other message resets the discovery in progress flag
+      browserUiAdapter.discoveryInProgress = false;
+    }
+    
+    // Skip if this is the same as the last non-error status message
+    if (message === browserUiAdapter.lastStatusMessage && !isError) {
+      return;
+    }
+    
+    // Update the status and remember this message
+    browserUiAdapter.lastStatusMessage = message;
     uiElements.status.textContent = message;
     uiElements.status.style.color = isError ? "red" : "";
     console.log(isError ? "ERROR: " + message : "Status: " + message);

@@ -706,7 +706,10 @@ async function _runDiscoveryCycle() {
   }
 
   _logDebug("API: Starting DHT peer discovery cycle...");
-  uiAdapter.updateStatus("Discovering peers through DHT...");
+  // Only show "Discovering peers" status if we have fewer than 3 connections
+  if (dhtInstance.peers.size < 3) {
+    uiAdapter.updateStatus("Discovering peers through DHT...");
+  }
 
   try {
     // Discover peers using DHT's findNode and potentially other methods
@@ -721,12 +724,16 @@ async function _runDiscoveryCycle() {
     // Combine, filter, and connect
     const allPeerIds = [...discoveredPeers, ...closeSelfPeerIds];
     const uniquePeerIds = [...new Set(allPeerIds)].filter(id => id !== dhtInstance.nodeId);
+    
+    // Filter out peers we're already connected to or connecting to
+    const newPeerIds = uniquePeerIds.filter(peerId =>
+      !dhtInstance.peers.has(peerId) && !pendingConnections.has(peerId)
+    );
 
-    if (uniquePeerIds.length > 0) {
-      uiAdapter.updateStatus(`Discovered ${uniquePeerIds.length} unique peers through DHT`);
-      const peersToConnect = uniquePeerIds
-        .filter(peerId => !dhtInstance.peers.has(peerId) && !pendingConnections.has(peerId))
-        .slice(0, 5); // Limit connection attempts per cycle
+    // Only update status if we found new peers to connect to
+    if (newPeerIds.length > 0) {
+      uiAdapter.updateStatus(`Discovered ${newPeerIds.length} new unique peers through DHT`);
+      const peersToConnect = newPeerIds.slice(0, 5); // Limit connection attempts per cycle
 
       _logDebug(`API: Attempting to connect to ${peersToConnect.length} new peers`);
       for (const peerId of peersToConnect) {
@@ -742,6 +749,7 @@ async function _runDiscoveryCycle() {
       }
     } else {
       _logDebug("API: No new peers discovered in this cycle.");
+      // Don't update UI when no new peers are found to avoid spamming status messages
     }
 
     // Announce presence

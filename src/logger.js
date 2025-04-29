@@ -1,7 +1,24 @@
+import { ENV } from './utils.js';
+
 class Logger {
   constructor(moduleName) {
     this.moduleName = moduleName;
-    this.logLevel = process.env.LOG_LEVEL || 'info';
+    // Use environment detection to safely get log level
+    this.logLevel = this.getLogLevel();
+  }
+
+  getLogLevel() {
+    // Node.js environment
+    if (ENV.NODE && typeof process !== 'undefined' && process.env) {
+      return process.env.LOG_LEVEL || 'info';
+    }
+    // Browser environment
+    else if (ENV.BROWSER && typeof window !== 'undefined') {
+      // Check for global log level variable
+      return window.LOG_LEVEL || 'info';
+    }
+    // Default fallback
+    return 'info';
   }
 
   debug(...args) {
