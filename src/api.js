@@ -4,6 +4,7 @@
  */
 
 import WebDHT from "./index.js"; // Assuming index.js is the main export
+import Logger from './logger.js';
 
 // Keep track of connected peers for demo/logging
 const connectedPeers = new Set();
@@ -16,11 +17,18 @@ let uiAdapter = {
   updateStatus: (message, isError = false) => _logDebug(isError ? `ERROR: ${message}` : `Status: ${message}`),
   updatePeerList: (peerIds) => _logDebug("Available peers:", peerIds),
   addMessage: (peerId, message, isOutgoing) => _logDebug(`Message ${isOutgoing ? 'to' : 'from'} ${peerId.substring(0,8)}: ${message}`),
-  getWebSocket: (url) => new WebSocket(url) // Browser default
+  getWebSocket: (url) => new WebSocket(url), // Browser default
+  updateConnectedPeers: (peers) => {
+    if (!peers || !peers.length) return;
+    _logDebug(`Connected peers (${peers.length}): ${peers.map(p => p.substring(0, 8) + '...').join(', ')}`);
+  }
 };
 
 
-var  _logDebug = {}
+// Global logger instance
+let logger = null;
+// Global debug logging function
+let _logDebug = function() {}; // Default no-op implementation
 
 /**
  * Initializes the API manager with a DHT instance and UI adapter.
@@ -32,11 +40,18 @@ export function initializeApi(dht, adapter, debug = false) {
    * Helper for conditional debug logging
    * @private
    */
+  // Initialize logger
+  logger = new Logger("API");
+  
+  // Create debug logging function
   _logDebug = (...args) => {
     if (debug) {
       // Ensure nodeIdHex exists before trying to use substring
       const prefix = this.nodeIdHex ? this.nodeIdHex.substring(0, 4) : "init";
-      console.debug(`[DHT ${prefix}]`, ...args);
+      // Format args to include the node ID prefix at the beginning
+      const formattedArgs = [`[${prefix}]`, ...args];
+      // Use the logger instance
+      logger.debug(...formattedArgs);
     }
   }
 
@@ -238,18 +253,27 @@ export function initializeApi(dht, adapter, debug = false) {
     }
   });
 
-  // Listen for peer connection events
-  dhtInstance.on("connect", (peerId, peer) => {
+  // Listen for peer connection events with peer: prefix
+  dhtInstance.on("peer:connect", (peerId) => {
     _logDebug(`API: Connected to peer: ${peerId.substring(0, 8)}...`);
     connectedPeers.add(peerId);
     pendingConnections.delete(peerId);
     uiAdapter.updateStatus(`Connected to peer: ${peerId.substring(0, 8)}...`);
     // <<< ADDED: Update connected peers list >>>
+    _logDebug(`Updating connected peers list with ${connectedPeers.size} peers`);
+    _logDebug(`Peer disconnected - updating connected peers list to ${connectedPeers.size}`);
     if (uiAdapter.updateConnectedPeers) {
       uiAdapter.updateConnectedPeers(Array.from(connectedPeers));
     }
     // The signaling server message 'registered' or 'new_peer' should update the list
     // Or we can call uiAdapter.updatePeerList([...connectedPeers]); if needed
+
+    // Get the peer object from the DHT instance
+    const peer = dhtInstance.peers.get(peerId);
+    if (!peer) {
+      _logDebug(`API: Could not find peer object for ${peerId.substring(0, 8)}...`);
+      return;
+    }
 
     // Listen for data from this specific peer
     peer.on("data", (data) => {
@@ -287,23 +311,39 @@ export function initializeApi(dht, adapter, debug = false) {
        uiAdapter.updateStatus(`Peer error (${peerId.substring(0, 8)}...): ${err.message}`, true);
        // uiAdapter.updatePeerList([...connectedPeers]);
        // <<< ADDED: Update connected peers list >>>
+       _logDebug(`Peer error - updating connected peers list to ${connectedPeers.size}`);
        if (uiAdapter.updateConnectedPeers) {
          uiAdapter.updateConnectedPeers(Array.from(connectedPeers));
        }
      });
   });
 
-  // Listen for general disconnection events (might be redundant with peer.on('close'))
-  dhtInstance.on("disconnect", (peerId) => {
-    _logDebug(`API: Disconnected from peer: ${peerId.substring(0, 8)}...`);
+  // Listen for general disconnection events with peer: prefix
+  dhtInstance.on("peer:disconnect", (peerId, reason) => {
+    _logDebug(`API: Disconnected from peer: ${peerId.substring(0, 8)}... Reason: ${reason || 'unknown'}`);
     connectedPeers.delete(peerId);
     pendingConnections.delete(peerId);
     uiAdapter.updateStatus(`Peer disconnected: ${peerId.substring(0, 8)}...`);
     // uiAdapter.updatePeerList([...connectedPeers]);
     // <<< ADDED: Update connected peers list >>>
+    _logDebug(`Updating connected peers list with ${connectedPeers.size} peers`);
+    _logDebug(`Peer disconnected - updating connected peers list to ${connectedPeers.size}`);
     if (uiAdapter.updateConnectedPeers) {
       uiAdapter.updateConnectedPeers(Array.from(connectedPeers));
     }
+  });
+
+  // Add handlers for other peer events
+  dhtInstance.on("peer:error", (data) => {
+    const peerId = data.peer;
+    const errorMsg = data.error;
+    _logDebug(`API: Peer error event for ${peerId.substring(0, 8)}...: ${errorMsg}`);
+    uiAdapter.updateStatus(`Peer error (${peerId.substring(0, 8)}...): ${errorMsg}`, true);
+  });
+
+  dhtInstance.on("peer:limit_reached", (peerId) => {
+    _logDebug(`API: Peer limit reached for ${peerId.substring(0, 8)}...`);
+    uiAdapter.updateStatus(`Connection to ${peerId.substring(0, 8)}... failed: Peer limit reached`, true);
   });
 }
 
@@ -536,10 +576,16 @@ function setupPeerEvents(peer, peerId) {
     connectedPeers.add(peerId);
     pendingConnections.delete(peerId);
     // Update UI with connected peers list
+    _logDebug(`Updating connected peers list with ${connectedPeers.size} peers`);
+    _logDebug(`Peer disconnected - updating connected peers list to ${connectedPeers.size}`);
     if (uiAdapter.updateConnectedPeers) {
       uiAdapter.updateConnectedPeers(Array.from(connectedPeers));
     } else {
       uiAdapter.updatePeerList([...connectedPeers]); // Fallback to updatePeerList
+    }
+    // Ensure both initiator and receiver see the status update
+    if (typeof peer.initiator !== "undefined" && !peer.initiator) {
+      uiAdapter.updateStatus(`Connected to: ${dhtInstance.nodeId.substring(0, 8)}...`);
     }
     // Optionally send a hello message
     // peer.send(`Hello from ${dhtInstance.nodeId}`);
@@ -557,6 +603,8 @@ function setupPeerEvents(peer, peerId) {
     connectedPeers.delete(peerId);
     pendingConnections.delete(peerId);
     // Update UI with connected peers list
+    _logDebug(`Updating connected peers list with ${connectedPeers.size} peers`);
+    _logDebug(`Peer disconnected - updating connected peers list to ${connectedPeers.size}`);
     if (uiAdapter.updateConnectedPeers) {
       uiAdapter.updateConnectedPeers(Array.from(connectedPeers));
     } else {
@@ -573,10 +621,9 @@ function setupPeerEvents(peer, peerId) {
     connectedPeers.delete(peerId);
     pendingConnections.delete(peerId);
     uiAdapter.updateStatus(`Peer disconnected: ${peerId.substring(0, 8)}...`);
-    // uiAdapter.updatePeerList([...connectedPeers]);
+    uiAdapter.updatePeerList([...connectedPeers]);
   });
 }
-
 
 /**
  * Stores a key-value pair in the DHT.

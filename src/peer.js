@@ -4,6 +4,7 @@
 import EventEmitter from "./event-emitter.js";
 import { getSimplePeer } from "./peer-factory.js";
 import { ENV, bufferToHex } from "./utils.js";
+import Logger from "./logger.js";
 
 class Peer extends EventEmitter {
   /**
@@ -23,6 +24,10 @@ class Peer extends EventEmitter {
     this.connected = false;
     this.destroyed = false;
     this.initialized = false;
+    this.debug = options.debug || false;
+    
+    // Initialize logger
+    this.logger = new Logger("Peer");
     
     // Store retry and reconnection options
     this.reconnectTimer = options.reconnectTimer || 0; // Default: no auto-reconnect
@@ -62,6 +67,19 @@ class Peer extends EventEmitter {
     // Initialize asynchronously
     this._initialize();
   }
+  
+  /**
+   * Helper for conditional debug logging
+   * @private
+   */
+  _logDebug(...args) {
+    if (this.debug) {
+      // Ensure peerIdHex exists before trying to use substring
+      const prefix = this.peerIdHex ? this.peerIdHex.substring(0, 8) : "init";
+      // Format args to include the node ID prefix
+      this.logger.debug(`[${prefix}]`, ...args);
+    }
+  }
 
   /**
    * Initialize the peer connection (async)
@@ -74,7 +92,7 @@ class Peer extends EventEmitter {
           const wrtcModule = await import("@koush/wrtc");
           this.options.wrtc = wrtcModule.default;
         } catch (wrtcErr) {
-          console.warn("Failed to import wrtc in Node:", wrtcErr.message);
+          this._logDebug("Failed to import wrtc in Node:", wrtcErr.message);
         }
       }
 
@@ -93,8 +111,9 @@ class Peer extends EventEmitter {
         const signal = this.signalQueue.shift();
         this.signal(signal);
       }
+      this._logDebug(`Peer initialized with ID ${this.peerIdHex.substring(0, 8)}...`);
     } catch (err) {
-      console.error("Failed to initialize peer:", err.message);
+      this._logDebug("Failed to initialize peer:", err.message);
       this.emit("error", err, this.peerIdHex);
     }
   }
@@ -143,12 +162,12 @@ class Peer extends EventEmitter {
       
       // Try to reconnect if reconnectTimer is set and we haven't exceeded retries
       if (this.reconnectTimer > 0 && this.currentRetry < this.retries) {
-        console.log(`Connection to ${this.peerIdHex.substring(0, 8)}... closed. Attempting reconnect in ${this.reconnectTimer}ms (retry ${this.currentRetry + 1}/${this.retries})`);
+        this._logDebug(`Connection to ${this.peerIdHex.substring(0, 8)}... closed. Attempting reconnect in ${this.reconnectTimer}ms (retry ${this.currentRetry + 1}/${this.retries})`);
         
         this.currentRetry++;
         this.reconnectTimeout = setTimeout(() => {
           if (!this.destroyed) {
-            console.log(`Attempting to reconnect to ${this.peerIdHex.substring(0, 8)}...`);
+            this._logDebug(`Attempting to reconnect to ${this.peerIdHex.substring(0, 8)}...`);
             // Recreate the peer with the same options
             this._initialize();
           }
@@ -159,7 +178,7 @@ class Peer extends EventEmitter {
     });
 
     this.peer.on("error", (err) => {
-      console.error(`Peer error with ${this.peerIdHex.substring(0, 8)}...`, err.message);
+      this._logDebug(`Peer error with ${this.peerIdHex.substring(0, 8)}...`, err.message);
       this.emit("error", err, this.peerIdHex);
       
       // Handle ICE connection failures specifically
@@ -168,7 +187,7 @@ class Peer extends EventEmitter {
           err.message.includes("ICE failed") ||
           err.code === 'ERR_ICE_CONNECTION_FAILURE')) {
         
-        console.log(`ICE connection failed with ${this.peerIdHex.substring(0, 8)}... Will retry if configured.`);
+        this._logDebug(`ICE connection failed with ${this.peerIdHex.substring(0, 8)}... Will retry if configured.`);
         
         // Force close and trigger reconnect logic
         if (this.peer) {
@@ -181,7 +200,7 @@ class Peer extends EventEmitter {
     if (this.iceCompleteTimeout > 0) {
       this.iceTimeoutTimer = setTimeout(() => {
         if (this.peer && !this.connected) {
-          console.log(`ICE connection timed out after ${this.iceCompleteTimeout}ms for peer ${this.peerIdHex.substring(0, 8)}...`);
+          this._logDebug(`ICE connection timed out after ${this.iceCompleteTimeout}ms for peer ${this.peerIdHex.substring(0, 8)}...`);
           
           // Force close and trigger reconnect logic
           this.peer.destroy();

@@ -66,7 +66,8 @@ const browserUiAdapter = {
       const shortId = peerId.substring(0, 8) + '...';
       // Add to available peers list
       const li = document.createElement('li');
-      li.textContent = `${shortId} (${peerId})`;
+      // li.textContent = shortId;
+      li.textContent = peerId
       li.dataset.peerId = peerId;
       li.style.cursor = 'pointer';
       li.onclick = () => {
@@ -117,10 +118,27 @@ const browserUiAdapter = {
     const ul = document.createElement('ul');
     ul.className = 'peer-list'; // Reuse existing style
     connectedPeerIds.forEach(peerId => {
-      const shortId = peerId.substring(0, 8) + '...';
       const li = document.createElement('li');
       li.className = 'peer-list-item';
-      li.textContent = `${shortId} (${peerId})`;
+      
+      // Create a span with the full ID that can be clicked to toggle
+      const idSpan = document.createElement('span');
+      idSpan.textContent = peerId;
+      idSpan.title = "Click to toggle full/short ID";
+      idSpan.style.cursor = 'pointer';
+      
+      // Toggle between full and short ID on click
+      let showingFullId = true;
+      idSpan.addEventListener('click', () => {
+        if (showingFullId) {
+          idSpan.textContent = peerId.substring(0, 8) + '...';
+        } else {
+          idSpan.textContent = peerId;
+        }
+        showingFullId = !showingFullId;
+      });
+      
+      li.appendChild(idSpan);
       // Optional: Add disconnect button or other actions here
       ul.appendChild(li);
     });
@@ -178,7 +196,7 @@ async function initApp() {
     const dht = new WebDHT({
       signalBatchInterval: 100, // Batch signals for 100ms
       signalCompression: true,  // Enable signal compression
-      debug: true,              // Enable debug logging
+      debug: false,              // Enable debug logging
       dhtSignalThreshold: 2,    // Reduced from default 3 to 2
       dhtRouteRefreshInterval: 15000, // Reduced from default 30s to 15s
       aggressiveDiscovery: true, // Always enable aggressive discovery
@@ -605,3 +623,4 @@ window.initApp = async function() {
 
 // Auto-initialize the app when loaded
 document.addEventListener('DOMContentLoaded', window.initApp);
+

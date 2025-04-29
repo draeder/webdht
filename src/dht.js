@@ -16,6 +16,7 @@ import {
   hexToBuffer,
   Buffer,
 } from "./utils.js";
+import Logger from './logger.js';
 
 // Default Kademlia constants
 const DEFAULT_K = 20; // Default size of k-buckets
@@ -47,13 +48,6 @@ class KBucket {
     this.BUCKET_COUNT = DEFAULT_BUCKET_COUNT; // Add this line to fix the issue
     this.left = null; // 0 bucket after split
     this.right = null; // 1 bucket after split
-  }
-
-  _logDebug(...args) {
-    // Add debug logger method
-    if (this.debug) {
-      console.debug("[KBucket]", ...args);
-    }
   }
 
   /**
@@ -300,6 +294,9 @@ class DHT extends EventEmitter {
           ? options.maxPeers
           : Infinity;
 
+      // Initialize logger
+      this.logger = new Logger("DHT");
+
       // Store simple-peer options to pass to new peer connections
       this.simplePeerOptions = options.simplePeerOptions || {};
 
@@ -362,8 +359,8 @@ class DHT extends EventEmitter {
       this._setupMaintenance();
 
       // Log node creation with maxPeers info
-      console.log(
-        `DHT node created with ID: ${this.nodeIdHex}, maxPeers: ${this.maxPeers}`
+      this.logger.info(
+        `Node created with ID: ${this.nodeIdHex}, maxPeers: ${this.maxPeers}`
       );
 
       // Emit ready event with the node ID
@@ -372,7 +369,7 @@ class DHT extends EventEmitter {
       // Start periodic DHT route refresh
       this._setupDHTRouteRefresh();
     } catch (error) {
-      _logDebug("Error initializing DHT node:", error);
+      this._logDebug("Error initializing DHT node:", error);
       this.emit("error", error);
     }
   }
@@ -385,7 +382,12 @@ class DHT extends EventEmitter {
     if (this.debug) {
       // Ensure nodeIdHex exists before trying to use substring
       const prefix = this.nodeIdHex ? this.nodeIdHex.substring(0, 4) : "init";
-      console.debug(`[DHT ${prefix}]`, ...args);
+      
+      // Format args to include the node ID prefix at the beginning
+      const formattedArgs = [`[${prefix}]`, ...args];
+      
+      // Use the Logger instance only when this.debug is true
+      this.logger.debug(...formattedArgs);
     }
   }
 
@@ -609,7 +611,7 @@ class DHT extends EventEmitter {
    * @private
    */
   _bootstrap(nodes) {
-    console.log(`Bootstrapping DHT with ${nodes.length} nodes...`);
+    this.logger.info(`Bootstrapping DHT with ${nodes.length} nodes...`);
 
     // Connect to bootstrap nodes
     nodes.forEach((node) => {
@@ -987,7 +989,7 @@ class DHT extends EventEmitter {
     
     // Handle successful connection
     peer.on("connect", (peerId) => {
-      console.log(`Connected to peer: ${peerId}`);
+      this._logDebug(`Connected to peer: ${peerId}`);
       // Add node to routing table
       this._addNode({
         id: hexToBuffer(peerId),
@@ -1037,14 +1039,14 @@ class DHT extends EventEmitter {
 
     // Handle disconnect
     peer.on("close", (peerId) => {
-      console.log(`Disconnected from peer: ${peerId}`);
+      // console.log(`Disconnected from peer: ${peerId}`);
       this.peers.delete(peerId);
       this.emit("peer:disconnect", peerId);
     });
 
     // Handle errors
     peer.on("error", (err, peerId) => {
-      _logDebug(`Error with peer ${peerId}:`, err.message);
+      // _logDebug(`Error with peer ${peerId}:`, err.message);
       this.emit("peer:error", { peer: peerId, error: err.message });
     });
   }
