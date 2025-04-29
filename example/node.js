@@ -120,7 +120,7 @@ async function init() {
 
     // Network parameters
     maxPeers: 3, // Increased from 4 to 6 to allow more connections
-    debug: true, // Enable debug logging
+    debug: false, // Enable debug logging
     
     // DHT signaling optimization parameters
     dhtSignalThreshold: 2, // Reduced from default 3 to 2

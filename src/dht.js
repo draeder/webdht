@@ -372,7 +372,7 @@ class DHT extends EventEmitter {
       // Start periodic DHT route refresh
       this._setupDHTRouteRefresh();
     } catch (error) {
-      console.error("Error initializing DHT node:", error);
+      _logDebug("Error initializing DHT node:", error);
       this.emit("error", error);
     }
   }
@@ -1044,7 +1044,7 @@ class DHT extends EventEmitter {
 
     // Handle errors
     peer.on("error", (err, peerId) => {
-      console.error(`Error with peer ${peerId}:`, err.message);
+      _logDebug(`Error with peer ${peerId}:`, err.message);
       this.emit("peer:error", { peer: peerId, error: err.message });
     });
   }
@@ -1430,7 +1430,7 @@ class DHT extends EventEmitter {
       keyStr === "undefined" ||
       keyStr === "null"
     ) {
-      console.warn("[DHT._handleStore] Invalid key:", keyStr);
+      _logDebug("[DHT._handleStore] Invalid key:", keyStr);
       peer.send({
         type: "STORE_RESPONSE",
         sender: this.nodeIdHex,
@@ -1442,7 +1442,7 @@ class DHT extends EventEmitter {
     }
     // Validate key size
     if (Buffer.from(keyStr).length > this.MAX_KEY_SIZE) {
-      console.warn("[DHT._handleStore] Key too large:", keyStr);
+      _logDebug("[DHT._handleStore] Key too large:", keyStr);
       peer.send({
         type: "STORE_RESPONSE",
         sender: this.nodeIdHex,
@@ -1456,7 +1456,7 @@ class DHT extends EventEmitter {
     // Validate value presence
     const value = message.value;
     if (typeof value === "undefined" || value === null) {
-      console.warn("[DHT._handleStore] Value is undefined or null");
+      _logDebug("[DHT._handleStore] Value is undefined or null");
       peer.send({
         type: "STORE_RESPONSE",
         sender: this.nodeIdHex,
@@ -1476,7 +1476,7 @@ class DHT extends EventEmitter {
         : Buffer.from(JSON.stringify(value)).length;
 
     if (valueSize > this.MAX_VALUE_SIZE) {
-      console.warn("[DHT._handleStore] Value too large:", valueSize, "bytes");
+      _logDebug("[DHT._handleStore] Value too large:", valueSize, "bytes");
       peer.send({
         type: "STORE_RESPONSE",
         sender: this.nodeIdHex,
@@ -1497,7 +1497,7 @@ class DHT extends EventEmitter {
         keyHashHex = bufferToHex(hash);
         this._logDebug("Key hash:", keyHashHex);
       } catch (err) {
-        console.error("[DHT._handleStore] Error hashing key:", err);
+        _logDebug("[DHT._handleStore] Error hashing key:", err);
         peer.send({
           type: "STORE_RESPONSE",
           sender: this.nodeIdHex,
@@ -2221,9 +2221,7 @@ class DHT extends EventEmitter {
     this._logDebug(`get - No value found for key: ${key} in DHT`);
     return null;
   }
-
-  // ... existing code ...
-
+  
   /**
    * Replicate data to K closest nodes for each key
    * @private
