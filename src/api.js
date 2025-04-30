@@ -46,8 +46,8 @@ export function initializeApi(dht, adapter, debug = false) {
   // Create debug logging function
   _logDebug = (...args) => {
     if (debug) {
-      // Ensure nodeIdHex exists before trying to use substring
-      const prefix = this.nodeIdHex ? this.nodeIdHex.substring(0, 4) : "init";
+      // Don't try to use this.nodeIdHex since we're in a module context
+      const prefix = dht && dht.nodeId ? dht.nodeId.substring(0, 4) : "API";
       // Format args to include the node ID prefix at the beginning
       const formattedArgs = [`[${prefix}]`, ...args];
       // Use the logger instance
@@ -571,13 +571,16 @@ function setupPeerEvents(peer, peerId) {
   peer._eventsAttached = true;
 
   peer.on("connect", () => {
-    _logDebug(`API: Connected to ${peerId}`);
+    if (typeof _logDebug === 'function') {
+      _logDebug(`API: Connected to ${peerId}`);
+    }
     uiAdapter.updateStatus(`Connected to: ${peerId.substring(0, 8)}...`);
     connectedPeers.add(peerId);
     pendingConnections.delete(peerId);
     // Update UI with connected peers list
-    _logDebug(`Updating connected peers list with ${connectedPeers.size} peers`);
-    _logDebug(`Peer disconnected - updating connected peers list to ${connectedPeers.size}`);
+    if (typeof _logDebug === 'function') {
+      _logDebug(`Updating connected peers list with ${connectedPeers.size} peers`);
+    }
     if (uiAdapter.updateConnectedPeers) {
       uiAdapter.updateConnectedPeers(Array.from(connectedPeers));
     } else {
@@ -592,13 +595,17 @@ function setupPeerEvents(peer, peerId) {
   });
 
   peer.on("error", (err) => {
-    _logDebug(`API: Peer ${peerId} error:`, err);
+    if (typeof _logDebug === 'function') {
+      _logDebug(`API: Peer ${peerId} error:`, err);
+    }
     uiAdapter.updateStatus(`Peer error (${peerId.substring(0, 8)}...): ${err.message}`, true);
     // Consider removing peer from connectedPeers here if error is fatal
   });
 
   peer.on("close", () => {
-    _logDebug(`API: Peer ${peerId} connection closed.`);
+    if (typeof _logDebug === 'function') {
+      _logDebug(`API: Peer ${peerId} connection closed.`);
+    }
     uiAdapter.updateStatus(`Disconnected from: ${peerId.substring(0, 8)}...`);
     connectedPeers.delete(peerId);
     pendingConnections.delete(peerId);

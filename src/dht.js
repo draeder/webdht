@@ -51,6 +51,24 @@ class KBucket {
   }
 
   /**
+   * Helper for conditional debug logging
+   * @private
+   */
+  _logDebug(...args) {
+    if (this.debug) {
+      // Create a prefix with the class name and the first few characters of the local node ID
+      const prefix = this.localNodeId ?
+        `[KBucket:${typeof this.localNodeId === 'string' ?
+          this.localNodeId.substring(0, 4) :
+          bufferToHex(this.localNodeId).substring(0, 4)}]` :
+        '[KBucket:init]';
+      
+      // Format args to include the prefix
+      console.debug(prefix, ...args);
+    }
+  }
+
+  /**
    * Add a node to the bucket
    * @param {Object} node - Node to add
    * @return {boolean} True if node was added
