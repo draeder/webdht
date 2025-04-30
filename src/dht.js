@@ -255,8 +255,9 @@ class DHT extends EventEmitter {
   }
   constructor(options = {}) {
     super();
-
+    options = { ...options.dhtOptions }
     // Initialize Kademlia parameters with defaults or user-provided values
+    console.log("🥰", "DHT options", options)
     this.K = options.k || DEFAULT_K;
     this.ALPHA = options.alpha || DEFAULT_ALPHA;
     this.BUCKET_COUNT = options.bucketCount || DEFAULT_BUCKET_COUNT;
@@ -379,7 +380,7 @@ class DHT extends EventEmitter {
    * @private
    */
   _logDebug(...args) {
-    if (this.debug) {
+    if (this.debug && this.logger?.debug) {
       // Ensure nodeIdHex exists before trying to use substring
       const prefix = this.nodeIdHex ? this.nodeIdHex.substring(0, 4) : "init";
       

@@ -108,7 +108,7 @@ global.CustomEvent = class CustomEvent {
 
 // Initialize DHT and API
 async function init() {
-  autoconnectEnabled = process.argv.includes("--autoconnect");
+  autoconnectEnabled = process.argv.includes("--auto");
 
   const dhtOptions = {
     k: 20,

@@ -73,10 +73,8 @@ class Peer extends EventEmitter {
    * @private
    */
   _logDebug(...args) {
-    if (this.debug) {
-      // Ensure peerIdHex exists before trying to use substring
-      const prefix = this.peerIdHex ? this.peerIdHex.substring(0, 8) : "init";
-      // Format args to include the node ID prefix
+    if (this.debug && this.logger?.debug) {
+      const prefix = `Peer:${this.peerIdHex?.substring(0, 8) || 'unknown'}`;
       this.logger.debug(`[${prefix}]`, ...args);
     }
   }

@@ -34,7 +34,9 @@ const wss = new WebSocketServer({ server });
 const peers = new Map(); // id -> websocket
 
 // Tracking statistics
-const peerStats = new Map(); // id -> { byteCount, signalCount, dhtSignalCount, serverSignalCount, connections }
+const peerStats = new Map(); // id -> {
+  // byteCount, signalCount, dhtSignalCount, serverSignalCount,
+  // connections: { target -> { type: 'dht'|'server', ... } }
 
 // Handle WebSocket connections
 wss.on("connection", (ws) => {
@@ -143,6 +145,7 @@ wss.on("connection", (ws) => {
           const connectionStats = sourceStats.connections.get(targetId);
           connectionStats.dhtSignalCount++;
           connectionStats.signalCount++;
+          connectionStats.type = 'dht'; // Track connection type
         }
       }
       
@@ -172,6 +175,7 @@ wss.on("connection", (ws) => {
           const connectionStats = sourceStats.connections.get(targetId);
           connectionStats.serverSignalCount++;
           connectionStats.signalCount++;
+          connectionStats.type = 'server'; // Track connection type
         }
       }
       
@@ -241,6 +245,19 @@ wss.on("connection", (ws) => {
           
           targetWs.send(signalStr);
           console.log("Signal forwarded");
+          
+          // Broadcast signal event
+          const signalEvent = {
+            type: 'signal_event',
+            source: peerId,
+            target: targetId,
+            signalType: 'server'
+          };
+          wss.clients.forEach(client => {
+            if (client.readyState === 1) {
+              client.send(JSON.stringify(signalEvent));
+            }
+          });
         } else {
           console.log(`Peer ${targetId} not available`);
           
@@ -268,6 +285,34 @@ wss.on("connection", (ws) => {
   });
 
   // Handle disconnections
+  // Broadcast network update when peers change
+  const broadcastNetworkUpdate = () => {
+    const nodes = Array.from(peers.keys()).map(id => ({ id }));
+    const links = [];
+    
+    for (const [sourceId, stats] of peerStats.entries()) {
+      for (const [targetId, conn] of stats.connections.entries()) {
+        links.push({
+          source: sourceId,
+          target: targetId,
+          type: conn.type
+        });
+      }
+    }
+    
+    const update = {
+      type: 'network_update',
+      nodes,
+      links
+    };
+    
+    wss.clients.forEach(client => {
+      if (client.readyState === 1) {
+        client.send(JSON.stringify(update));
+      }
+    });
+  };
+
   ws.on("close", () => {
     if (peerId) {
       console.log(`Disconnected: ${peerId}`);

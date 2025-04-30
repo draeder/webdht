@@ -6,8 +6,8 @@
  */
 
 // Import WebDHT and the SHA1 functionality
-import WebDHT from "/src/index.js";
-import { generateRandomId } from "/src/sha1.js";
+import WebDHT, { generateRandomId } from "/src/index.js";
+
 // Import the consolidated API functions
 import {
   initializeApi,
@@ -17,7 +17,7 @@ import {
   startDhtPeerDiscovery,
   stopDhtPeerDiscovery, // Assuming this might be needed later
   putValue, // Assuming this might be needed later
-  getValue // Assuming this might be needed later
+  getValue, // Assuming this might be needed later
 } from "../src/api.js";
 
 // Track connection attempts to prevent duplicate connections
@@ -29,7 +29,9 @@ function cacheUIElements() {
   uiElements.peerId = document.getElementById("peerId");
   uiElements.status = document.getElementById("status");
   uiElements.signalingUrl = document.getElementById("signalingUrl");
-  uiElements.connectSignalingBtn = document.getElementById("connectSignalingBtn");
+  uiElements.connectSignalingBtn = document.getElementById(
+    "connectSignalingBtn"
+  );
   uiElements.peerList = document.getElementById("peerList");
   uiElements.connectPeerId = document.getElementById("connectPeerId");
   uiElements.connectPeerBtn = document.getElementById("connectPeerBtn");
@@ -56,17 +58,20 @@ const browserUiAdapter = {
   discoveryInProgress: false,
   updateStatus: (message, isError = false) => {
     if (!uiElements.status) return;
-    
+
     // Handle "Discovering peers through DHT..." message
     if (message === "Discovering peers through DHT...") {
       if (browserUiAdapter.discoveryInProgress) {
         return; // Skip repeated discovery-in-progress messages
       }
       browserUiAdapter.discoveryInProgress = true;
-    } else if (message.includes("Discovered") && message.includes("unique peers through DHT")) {
+    } else if (
+      message.includes("Discovered") &&
+      message.includes("unique peers through DHT")
+    ) {
       // Reset discovery in progress flag when discovery result is shown
       browserUiAdapter.discoveryInProgress = false;
-      
+
       // Extract the number from "Discovered X unique peers through DHT"
       const match = message.match(/Discovered (\d+) unique peers through DHT/);
       if (match) {
@@ -81,12 +86,12 @@ const browserUiAdapter = {
       // Any other message resets the discovery in progress flag
       browserUiAdapter.discoveryInProgress = false;
     }
-    
+
     // Skip if this is the same as the last non-error status message
     if (message === browserUiAdapter.lastStatusMessage && !isError) {
       return;
     }
-    
+
     // Update the status and remember this message
     browserUiAdapter.lastStatusMessage = message;
     uiElements.status.textContent = message;
@@ -95,19 +100,19 @@ const browserUiAdapter = {
   },
   updatePeerList: (peerIds) => {
     if (!uiElements.peerList) return;
-    uiElements.peerList.innerHTML = ''; // Clear current list
+    uiElements.peerList.innerHTML = ""; // Clear current list
     const messagePeerSelect = uiElements.messagePeerId;
     const currentSelectedPeer = messagePeerSelect.value;
     messagePeerSelect.innerHTML = '<option value="">Select Peer</option>'; // Clear and add default
 
-    peerIds.forEach(peerId => {
-      const shortId = peerId.substring(0, 8) + '...';
+    peerIds.forEach((peerId) => {
+      const shortId = peerId.substring(0, 8) + "...";
       // Add to available peers list
-      const li = document.createElement('li');
+      const li = document.createElement("li");
       // li.textContent = shortId;
-      li.textContent = peerId
+      li.textContent = peerId;
       li.dataset.peerId = peerId;
-      li.style.cursor = 'pointer';
+      li.style.cursor = "pointer";
       li.onclick = () => {
         uiElements.connectPeerId.value = peerId;
         uiElements.messagePeerId.value = peerId;
@@ -115,7 +120,7 @@ const browserUiAdapter = {
       uiElements.peerList.appendChild(li);
 
       // Add to message dropdown
-      const option = document.createElement('option');
+      const option = document.createElement("option");
       option.value = peerId;
       option.textContent = shortId;
       messagePeerSelect.appendChild(option);
@@ -128,11 +133,13 @@ const browserUiAdapter = {
   },
   addMessage: (peerId, message, isOutgoing) => {
     if (!uiElements.chatMessages) return;
-    const shortId = peerId.substring(0, 8) + '...';
+    const shortId = peerId.substring(0, 8) + "...";
     const prefix = isOutgoing ? `To ${shortId}:` : `From ${shortId}:`;
-    const messageDiv = document.createElement('div');
+    const messageDiv = document.createElement("div");
     messageDiv.textContent = `${prefix} ${message}`;
-    messageDiv.classList.add(isOutgoing ? 'outgoing-message' : 'incoming-message');
+    messageDiv.classList.add(
+      isOutgoing ? "outgoing-message" : "incoming-message"
+    );
     uiElements.chatMessages.appendChild(messageDiv);
     // Scroll to bottom
     uiElements.chatMessages.scrollTop = uiElements.chatMessages.scrollHeight;
@@ -146,36 +153,36 @@ const browserUiAdapter = {
       console.error("UI Element Error: 'peers' div not found in cache.");
       return;
     }
-    peersDiv.innerHTML = ''; // Clear current list
+    peersDiv.innerHTML = ""; // Clear current list
 
     if (connectedPeerIds.length === 0) {
-      peersDiv.textContent = 'No connected peers';
+      peersDiv.textContent = "No connected peers";
       return;
     }
 
-    const ul = document.createElement('ul');
-    ul.className = 'peer-list'; // Reuse existing style
-    connectedPeerIds.forEach(peerId => {
-      const li = document.createElement('li');
-      li.className = 'peer-list-item';
-      
+    const ul = document.createElement("ul");
+    ul.className = "peer-list"; // Reuse existing style
+    connectedPeerIds.forEach((peerId) => {
+      const li = document.createElement("li");
+      li.className = "peer-list-item";
+
       // Create a span with the full ID that can be clicked to toggle
-      const idSpan = document.createElement('span');
+      const idSpan = document.createElement("span");
       idSpan.textContent = peerId;
       idSpan.title = "Click to toggle full/short ID";
-      idSpan.style.cursor = 'pointer';
-      
+      idSpan.style.cursor = "pointer";
+
       // Toggle between full and short ID on click
       let showingFullId = true;
-      idSpan.addEventListener('click', () => {
+      idSpan.addEventListener("click", () => {
         if (showingFullId) {
-          idSpan.textContent = peerId.substring(0, 8) + '...';
+          idSpan.textContent = peerId.substring(0, 8) + "...";
         } else {
           idSpan.textContent = peerId;
         }
         showingFullId = !showingFullId;
       });
-      
+
       li.appendChild(idSpan);
       // Optional: Add disconnect button or other actions here
       ul.appendChild(li);
@@ -186,61 +193,112 @@ const browserUiAdapter = {
   updateConnectionStatus: (status) => {
     if (uiElements.connectionStatus) {
       uiElements.connectionStatus.textContent = status;
-      
+
       // Set appropriate color based on status
       if (status.includes("Connected")) {
         uiElements.connectionStatus.style.color = "green";
-      } else if (status.includes("Connecting") || status.includes("Reconnecting")) {
+      } else if (
+        status.includes("Connecting") ||
+        status.includes("Reconnecting")
+      ) {
         uiElements.connectionStatus.style.color = "orange";
       } else {
         uiElements.connectionStatus.style.color = "red";
       }
     }
-  }
+  },
 };
 
 // Setup tabs functionality
 function setupTabs() {
-  const tabs = document.querySelectorAll('.tab');
-  const tabContents = document.querySelectorAll('.tab-content');
-  
-  tabs.forEach(tab => {
-    tab.addEventListener('click', () => {
+  const tabs = document.querySelectorAll(".tab");
+  const tabContents = document.querySelectorAll(".tab-content");
+
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
       // Remove active class from all tabs and contents
-      tabs.forEach(t => t.classList.remove('active'));
-      tabContents.forEach(content => content.classList.remove('active'));
-      
+      tabs.forEach((t) => t.classList.remove("active"));
+      tabContents.forEach((content) => content.classList.remove("active"));
+
       // Add active class to clicked tab
-      tab.classList.add('active');
-      
+      tab.classList.add("active");
+
       // Show corresponding content
-      const tabId = tab.getAttribute('data-tab');
+      const tabId = tab.getAttribute("data-tab");
       const content = document.getElementById(`${tabId}-content`);
       if (content) {
-        content.classList.add('active');
+        content.classList.add("active");
       }
     });
   });
 }
 
+const dhtOptions = {
+  k: 20,
+  alpha: 3,
+  bucketCount: 160,
+  maxStoreSize: 1000,
+  maxKeySize: 1024,
+  maxValueSize: 64000,
+  replicateInterval: 60000,
+  republishInterval: 300000,
+  maxPeers: 3,
+  debug: false,
+  dhtSignalThreshold: 2,
+  dhtRouteRefreshInterval: 15000,
+  aggressiveDiscovery: true,
+  simplePeerOptions: {
+    config: {
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" },
+        { urls: "stun:stun2.l.google.com:19302" },
+        { urls: "stun:stun3.l.google.com:19302" },
+        { urls: "stun:stun4.l.google.com:19302" },
+        { urls: "stun:global.stun.twilio.com:3478" },
+        {
+          urls: "turn:openrelay.metered.ca:80",
+          username: "openrelayproject",
+          credential: "openrelayproject",
+        },
+        {
+          urls: "turn:openrelay.metered.ca:443",
+          username: "openrelayproject",
+          credential: "openrelayproject",
+        },
+        {
+          urls: "turn:openrelay.metered.ca:443?transport=tcp",
+          username: "openrelayproject",
+          credential: "openrelayproject",
+        },
+      ],
+      iceCandidatePoolSize: 10,
+      iceTransportPolicy: "all",
+    },
+    trickle: false,
+    sdpTransform: (sdp) =>
+      sdp
+        .replace(
+          /a=ice-options:trickle\r\n/g,
+          "a=ice-options:trickle renomination\r\n"
+        )
+        .replace(
+          /a=setup:actpass\r\n/g,
+          "a=setup:actpass\r\na=connection-timeout:10\r\n"
+        ),
+  },
+};
+
 // Initialize the application
 async function initApp() {
   cacheUIElements(); // Cache UI elements references
   setupTabs(); // Setup tab functionality
-  
+
   try {
     console.log("Creating WebDHT instance...");
     // Create a WebDHT instance with signal batching and compression enabled
     const dht = new WebDHT({
-      signalBatchInterval: 100, // Batch signals for 100ms
-      signalCompression: true,  // Enable signal compression
-      debug: false,              // Enable debug logging
-      dhtSignalThreshold: 2,    // Reduced from default 3 to 2
-      dhtRouteRefreshInterval: 15000, // Reduced from default 30s to 15s
-      aggressiveDiscovery: true, // Always enable aggressive discovery
-      simplePeerOptions: {
-        trickle: false // Disable trickle ICE to reduce signaling traffic
-      }
+      dhtOptions,
     });
 
     // Initialize the consolidated API with the DHT instance and UI adapter
@@ -248,13 +306,18 @@ async function initApp() {
     initializeApi(dht, browserUiAdapter);
 
     // Set default signaling URL - Moved outside 'ready' handler
-    const defaultWsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+    const defaultWsUrl = `${
+      window.location.protocol === "https:" ? "wss:" : "ws:"
+    }//${window.location.host}`;
     // Check if the element exists before setting its value
     if (uiElements.signalingUrl) {
-        uiElements.signalingUrl.value = defaultWsUrl;
+      uiElements.signalingUrl.value = defaultWsUrl;
     } else {
-        console.error("Error: signalingUrl element not found after caching!");
-        browserUiAdapter.updateStatus("Error: UI element 'signalingUrl' missing.", true);
+      console.error("Error: signalingUrl element not found after caching!");
+      browserUiAdapter.updateStatus(
+        "Error: UI element 'signalingUrl' missing.",
+        true
+      );
     }
 
     // Set up the UI event listeners (buttons, inputs etc.) - Moved outside 'ready' handler
@@ -264,7 +327,7 @@ async function initApp() {
     dht.on("ready", (nodeId) => {
       // Only nodeId-dependent things remain here
       if (uiElements.peerId) {
-          uiElements.peerId.textContent = nodeId;
+        uiElements.peerId.textContent = nodeId;
       }
       browserUiAdapter.updateStatus("DHT node created with ID: " + nodeId);
 
@@ -281,7 +344,7 @@ async function initApp() {
     });
 
     // DHT 'error' event listener (optional, API might handle internally)
-    dht.on('error', (err) => {
+    dht.on("error", (err) => {
       console.error("DHT Global Error:", err);
       browserUiAdapter.updateStatus(`DHT Global Error: ${err.message}`, true);
     });
@@ -300,49 +363,65 @@ async function initApp() {
 function connectToSignalingServerWithRetry(url) {
   // Validate URL format
   if (!isValidSignalingUrl(url)) {
-    browserUiAdapter.updateStatus("Invalid signaling server URL format. Should be ws:// or wss://", true);
+    browserUiAdapter.updateStatus(
+      "Invalid signaling server URL format. Should be ws:// or wss://",
+      true
+    );
     return;
   }
 
   browserUiAdapter.updateConnectionStatus("Connecting to signaling server...");
   browserUiAdapter.updateStatus("Connecting to signaling server...");
-  
+
   // Use the API's connectSignaling function
   connectSignaling(url);
-  
+
   // Setup the reconnection logic and custom message handling using event listeners
   // rather than modifying WebSocket.prototype (which causes illegal invocation errors)
-  document.addEventListener('signaling:connected', () => {
+  document.addEventListener("signaling:connected", () => {
     browserUiAdapter.updateConnectionStatus("Connected to signaling server");
   });
-  
-  document.addEventListener('signaling:disconnected', (event) => {
+
+  document.addEventListener("signaling:disconnected", (event) => {
     const wasClean = event.detail?.wasClean || false;
     if (!wasClean) {
-      browserUiAdapter.updateStatus("Signaling connection lost. Attempting to reconnect...", true);
-      browserUiAdapter.updateConnectionStatus("Connection lost. Reconnecting...");
-      
+      browserUiAdapter.updateStatus(
+        "Signaling connection lost. Attempting to reconnect...",
+        true
+      );
+      browserUiAdapter.updateConnectionStatus(
+        "Connection lost. Reconnecting..."
+      );
+
       // Schedule reconnection with exponential backoff
       const reconnectAttempts = event.detail?.attempts || 1;
       const delay = Math.min(30000, Math.pow(2, reconnectAttempts) * 1000);
-      
-      browserUiAdapter.updateStatus(`Will attempt to reconnect in ${delay/1000} seconds...`);
-      
+
+      browserUiAdapter.updateStatus(
+        `Will attempt to reconnect in ${delay / 1000} seconds...`
+      );
+
       setTimeout(() => {
-        browserUiAdapter.updateStatus(`Reconnecting to signaling server (attempt ${reconnectAttempts})...`);
-        browserUiAdapter.updateConnectionStatus(`Reconnecting (attempt ${reconnectAttempts})...`);
+        browserUiAdapter.updateStatus(
+          `Reconnecting to signaling server (attempt ${reconnectAttempts})...`
+        );
+        browserUiAdapter.updateConnectionStatus(
+          `Reconnecting (attempt ${reconnectAttempts})...`
+        );
         connectSignaling(url, { reconnectAttempts });
       }, delay);
     } else {
-      browserUiAdapter.updateConnectionStatus("Disconnected from signaling server");
+      browserUiAdapter.updateConnectionStatus(
+        "Disconnected from signaling server"
+      );
     }
   });
-  
-  document.addEventListener('signaling:error', () => {
+
+  document.addEventListener("signaling:error", () => {
     browserUiAdapter.updateStatus("Signaling connection error", true);
     browserUiAdapter.updateConnectionStatus("Connection error");
   });
-  
+
   // These events will be dispatched from the api.js connectSignaling handler
   // when it processes these signaling server messages
 }
@@ -354,10 +433,10 @@ function connectToSignalingServerWithRetry(url) {
  */
 function isValidSignalingUrl(url) {
   if (!url) return false;
-  
+
   try {
     const parsedUrl = new URL(url);
-    return parsedUrl.protocol === 'ws:' || parsedUrl.protocol === 'wss:';
+    return parsedUrl.protocol === "ws:" || parsedUrl.protocol === "wss:";
   } catch (e) {
     return false;
   }
@@ -369,38 +448,44 @@ function isValidSignalingUrl(url) {
  */
 function attemptAutomaticPeerConnection(peerId) {
   if (!peerId) return;
-  
+
   // Skip if we're already attempting to connect to this peer
   if (connectionAttempts.has(peerId)) {
-    console.log(`Skipping auto-connect to ${peerId} - connection already in progress`);
+    console.log(
+      `Skipping auto-connect to ${peerId} - connection already in progress`
+    );
     return;
   }
-  
+
   // Use lexicographical comparison to determine who initiates the connection
   const dhtInstance = window.dhtInstance; // Assuming it's globally accessible
   if (!dhtInstance) {
     console.error("DHT instance not available for auto-connection");
     return;
   }
-  
+
   // Skip if we're already connected to this peer
   if (dhtInstance.peers.has(peerId)) {
     console.log(`Already connected to peer: ${peerId}`);
     return;
   }
-  
+
   const shouldInitiate = dhtInstance.nodeId < peerId;
-  
+
   if (shouldInitiate) {
     console.log(`Auto-connecting to peer: ${peerId} (we are initiator)`);
-    browserUiAdapter.updateStatus(`Auto-connecting to peer: ${peerId.substring(0, 8)}...`);
-    
+    browserUiAdapter.updateStatus(
+      `Auto-connecting to peer: ${peerId.substring(0, 8)}...`
+    );
+
     // Add to connection attempts set
     connectionAttempts.add(peerId);
-    
+
     // Log attempt for debugging
-    console.log(`Connection attempts before: ${Array.from(connectionAttempts)}`);
-    
+    console.log(
+      `Connection attempts before: ${Array.from(connectionAttempts)}`
+    );
+
     // Attempt connection with a small delay to ensure signaling is ready
     setTimeout(() => {
       connectToPeer(peerId)
@@ -413,13 +498,24 @@ function attemptAutomaticPeerConnection(peerId) {
             browserUiAdapter.updateConnectedPeers(connectedPeerIds);
           }
         })
-        .catch(err => {
-          console.error(`Auto-connect failed: ${err && err.message ? err.message : err}`);
-          browserUiAdapter.updateStatus(`Auto-connect to ${peerId.substring(0, 8)}... failed: ${err.message}`, true);
+        .catch((err) => {
+          console.error(
+            `Auto-connect failed: ${err && err.message ? err.message : err}`
+          );
+          browserUiAdapter.updateStatus(
+            `Auto-connect to ${peerId.substring(0, 8)}... failed: ${
+              err.message
+            }`,
+            true
+          );
           connectionAttempts.delete(peerId);
-          
+
           // Retry after a delay if this was a timing issue
-          if (err.message && (err.message.includes('timeout') || err.message.includes('failed to connect'))) {
+          if (
+            err.message &&
+            (err.message.includes("timeout") ||
+              err.message.includes("failed to connect"))
+          ) {
             console.log(`Will retry connection to ${peerId} after delay`);
             setTimeout(() => attemptAutomaticPeerConnection(peerId), 5000);
           }
@@ -437,8 +533,13 @@ function setupUIEventListeners() {
     if (uiElements[elementKey]) {
       uiElements[elementKey][eventType] = handler;
     } else {
-      console.error(`UI Element Error: Element with key '${elementKey}' not found in cache. Cannot attach ${eventType} listener.`);
-      browserUiAdapter.updateStatus(`Error: UI Element '${elementKey}' missing.`, true);
+      console.error(
+        `UI Element Error: Element with key '${elementKey}' not found in cache. Cannot attach ${eventType} listener.`
+      );
+      browserUiAdapter.updateStatus(
+        `Error: UI Element '${elementKey}' missing.`,
+        true
+      );
     }
   };
 
@@ -446,23 +547,31 @@ function setupUIEventListeners() {
     if (uiElements[elementKey]) {
       uiElements[elementKey].addEventListener(eventType, handler);
     } else {
-      console.error(`UI Element Error: Element with key '${elementKey}' not found in cache. Cannot attach ${eventType} listener.`);
-      browserUiAdapter.updateStatus(`Error: UI Element '${elementKey}' missing.`, true);
+      console.error(
+        `UI Element Error: Element with key '${elementKey}' not found in cache. Cannot attach ${eventType} listener.`
+      );
+      browserUiAdapter.updateStatus(
+        `Error: UI Element '${elementKey}' missing.`,
+        true
+      );
     }
   };
 
   // Connect to Signaling Server Button
-  safeAddEventListener('connectSignalingBtn', 'onclick', () => {
+  safeAddEventListener("connectSignalingBtn", "onclick", () => {
     const url = uiElements.signalingUrl.value;
     if (url) {
       connectToSignalingServerWithRetry(url); // Use our new connection function with retry
     } else {
-      browserUiAdapter.updateStatus("Please enter a signaling server URL.", true);
+      browserUiAdapter.updateStatus(
+        "Please enter a signaling server URL.",
+        true
+      );
     }
   });
 
   // Connect to Peer Button
-  safeAddEventListener('connectPeerBtn', 'onclick', () => {
+  safeAddEventListener("connectPeerBtn", "onclick", () => {
     const peerId = uiElements.connectPeerId.value;
     if (peerId) {
       connectToPeer(peerId); // Use API function
@@ -472,20 +581,23 @@ function setupUIEventListeners() {
   });
 
   // Send Message Button
-  safeAddEventListener('sendMessageBtn', 'onclick', () => {
+  safeAddEventListener("sendMessageBtn", "onclick", () => {
     const peerId = uiElements.messagePeerId.value;
     const message = uiElements.messageInput.value;
     if (peerId && message) {
       sendMessageToPeer(peerId, message); // Use API function
-      uiElements.messageInput.value = ''; // Clear input after sending
+      uiElements.messageInput.value = ""; // Clear input after sending
     } else {
-      browserUiAdapter.updateStatus("Please select a peer and enter a message", true);
+      browserUiAdapter.updateStatus(
+        "Please select a peer and enter a message",
+        true
+      );
     }
   });
 
   // Allow sending message with Enter key
-  safeAddGenericEventListener('messageInput', 'keypress', function (e) {
-    if (e.key === 'Enter') {
+  safeAddGenericEventListener("messageInput", "keypress", function (e) {
+    if (e.key === "Enter") {
       // Ensure sendMessageBtn exists before trying to click it
       if (uiElements.sendMessageBtn) {
         uiElements.sendMessageBtn.click(); // Trigger button click
@@ -496,89 +608,132 @@ function setupUIEventListeners() {
   });
 
   // Put Key-Value Button
-  safeAddEventListener('putBtn', 'onclick', async (event) => { // Added event parameter
+  safeAddEventListener("putBtn", "onclick", async (event) => {
+    // Added event parameter
     event.preventDefault(); // <<< ADDED: Prevent default form submission
     const key = uiElements.putKey.value;
     const value = uiElements.putValue.value;
     if (key && value) {
       try {
         browserUiAdapter.updateStatus(`Storing ${key}...`); // Add status update
-        
+
         // Check if we have minimum connected peers
         const dhtInstance = window.dhtInstance;
         if (dhtInstance && dhtInstance.peers.size < 2) {
-          browserUiAdapter.updateStatus(`Warning: Only ${dhtInstance.peers.size} peer(s) connected. DHT operations may fail.`, true);
+          browserUiAdapter.updateStatus(
+            `Warning: Only ${dhtInstance.peers.size} peer(s) connected. DHT operations may fail.`,
+            true
+          );
         }
-        
+
         await putValue(key, value); // Use API function
         browserUiAdapter.updateStatus(`Stored ${key} successfully.`); // Add success status
-        if (uiElements.putKey) uiElements.putKey.value = '';
-        if (uiElements.putValue) uiElements.putValue.value = '';
+        if (uiElements.putKey) uiElements.putKey.value = "";
+        if (uiElements.putValue) uiElements.putValue.value = "";
       } catch (err) {
         // Handle network failures with more detailed error information
-        browserUiAdapter.updateStatus(`Failed to store ${key}: ${err.message || 'Unknown error'}`, true);
+        browserUiAdapter.updateStatus(
+          `Failed to store ${key}: ${err.message || "Unknown error"}`,
+          true
+        );
         // Offer retry option
         if (confirm(`Failed to store value. Retry?`)) {
           setTimeout(async () => {
             try {
-              browserUiAdapter.updateStatus(`Retrying store operation for ${key}...`);
+              browserUiAdapter.updateStatus(
+                `Retrying store operation for ${key}...`
+              );
               await putValue(key, value);
-              browserUiAdapter.updateStatus(`Stored ${key} successfully on retry.`);
-              if (uiElements.putKey) uiElements.putKey.value = '';
-              if (uiElements.putValue) uiElements.putValue.value = '';
+              browserUiAdapter.updateStatus(
+                `Stored ${key} successfully on retry.`
+              );
+              if (uiElements.putKey) uiElements.putKey.value = "";
+              if (uiElements.putValue) uiElements.putValue.value = "";
             } catch (retryErr) {
-              browserUiAdapter.updateStatus(`Retry failed: ${retryErr.message || 'Unknown error'}`, true);
+              browserUiAdapter.updateStatus(
+                `Retry failed: ${retryErr.message || "Unknown error"}`,
+                true
+              );
             }
           }, 2000); // Wait 2 seconds before retry
         }
       }
     } else {
-      browserUiAdapter.updateStatus("Please enter both key and value to store.", true);
+      browserUiAdapter.updateStatus(
+        "Please enter both key and value to store.",
+        true
+      );
     }
   });
 
   // Get Value Button
-  safeAddEventListener('getBtn', 'onclick', async (event) => { // Added event parameter
+  safeAddEventListener("getBtn", "onclick", async (event) => {
+    // Added event parameter
     event.preventDefault(); // <<< ADDED: Prevent default form submission
     const key = uiElements.getKey.value;
     if (key) {
       try {
         browserUiAdapter.updateStatus(`Retrieving ${key}...`); // Add status update
-        
+
         // Check if we have minimum connected peers
         const dhtInstance = window.dhtInstance;
         if (dhtInstance && dhtInstance.peers.size < 2) {
-          browserUiAdapter.updateStatus(`Warning: Only ${dhtInstance.peers.size} peer(s) connected. DHT operations may fail.`, true);
+          browserUiAdapter.updateStatus(
+            `Warning: Only ${dhtInstance.peers.size} peer(s) connected. DHT operations may fail.`,
+            true
+          );
         }
-        
+
         const retrievedValue = await getValue(key); // Use API function
         if (uiElements.getResult) {
-          uiElements.getResult.textContent = retrievedValue !== null ? `Retrieved: ${retrievedValue}` : "Value not found.";
+          uiElements.getResult.textContent =
+            retrievedValue !== null
+              ? `Retrieved: ${retrievedValue}`
+              : "Value not found.";
         }
-        browserUiAdapter.updateStatus(retrievedValue !== null ? `Retrieved value for ${key}.` : `Value for ${key} not found.`); // Add status update
+        browserUiAdapter.updateStatus(
+          retrievedValue !== null
+            ? `Retrieved value for ${key}.`
+            : `Value for ${key} not found.`
+        ); // Add status update
       } catch (err) {
         if (uiElements.getResult) {
           uiElements.getResult.textContent = `Error: ${err.message}`;
         }
-        
+
         // Enhanced error handling
-        browserUiAdapter.updateStatus(`Failed to retrieve ${key}: ${err.message || 'Unknown error'}`, true);
-        
+        browserUiAdapter.updateStatus(
+          `Failed to retrieve ${key}: ${err.message || "Unknown error"}`,
+          true
+        );
+
         // Offer retry option
         if (confirm(`Failed to retrieve value. Retry?`)) {
           setTimeout(async () => {
             try {
-              browserUiAdapter.updateStatus(`Retrying retrieve operation for ${key}...`);
+              browserUiAdapter.updateStatus(
+                `Retrying retrieve operation for ${key}...`
+              );
               const retrievedValue = await getValue(key);
               if (uiElements.getResult) {
-                uiElements.getResult.textContent = retrievedValue !== null ? `Retrieved on retry: ${retrievedValue}` : "Value not found on retry.";
+                uiElements.getResult.textContent =
+                  retrievedValue !== null
+                    ? `Retrieved on retry: ${retrievedValue}`
+                    : "Value not found on retry.";
               }
-              browserUiAdapter.updateStatus(retrievedValue !== null ? `Retrieved value for ${key} on retry.` : `Value for ${key} not found on retry.`);
+              browserUiAdapter.updateStatus(
+                retrievedValue !== null
+                  ? `Retrieved value for ${key} on retry.`
+                  : `Value for ${key} not found on retry.`
+              );
             } catch (retryErr) {
               if (uiElements.getResult) {
                 uiElements.getResult.textContent = `Retry error: ${retryErr.message}`;
               }
-              browserUiAdapter.updateStatus(`Retry failed: ${retryErr.message || 'Unknown error'}`, true);
+              browserUiAdapter.updateStatus(
+                `Retry failed: ${retryErr.message || "Unknown error"}`,
+                true
+              );
             }
           }, 2000); // Wait 2 seconds before retry
         }
@@ -586,13 +741,13 @@ function setupUIEventListeners() {
     } else {
       browserUiAdapter.updateStatus("Please enter a key to retrieve.", true);
       if (uiElements.getResult) {
-        uiElements.getResult.textContent = '';
+        uiElements.getResult.textContent = "";
       }
     }
   });
 
   // Listen for signals from the API.js when new peers are discovered
-  document.addEventListener('api:new_peer', (event) => {
+  document.addEventListener("api:new_peer", (event) => {
     const { peerId } = event.detail;
     if (peerId) {
       attemptAutomaticPeerConnection(peerId);
@@ -600,11 +755,13 @@ function setupUIEventListeners() {
   });
 
   // Listen for signals when a peer registration happens to connect to existing peers
-  document.addEventListener('api:registered', (event) => {
+  document.addEventListener("api:registered", (event) => {
     const { peers } = event.detail;
     if (peers && peers.length > 0) {
-      console.log(`Found ${peers.length} existing peers via registration, connecting...`);
-      
+      console.log(
+        `Found ${peers.length} existing peers via registration, connecting...`
+      );
+
       // Connect to each existing peer with a small delay between connections
       peers.forEach((peerId, index) => {
         // Use setTimeout to stagger connection attempts
@@ -616,34 +773,36 @@ function setupUIEventListeners() {
   });
 
   // SHA1 Demo Button Listener
-  const demoButton = document.getElementById('demoButton'); // Get button directly as it wasn't cached
+  const demoButton = document.getElementById("demoButton"); // Get button directly as it wasn't cached
   if (demoButton) {
     demoButton.onclick = demonstrateSHA1;
   } else {
-    console.error("UI Element Error: 'demoButton' not found. Cannot attach listener.");
+    console.error(
+      "UI Element Error: 'demoButton' not found. Cannot attach listener."
+    );
   }
 }
 
 // Demonstrate SHA1 function
 async function demonstrateSHA1() {
-  const resultDiv = document.querySelector('#tools-content .result');
+  const resultDiv = document.querySelector("#tools-content .result");
   if (!resultDiv) {
     console.error("Could not find result div for SHA1 demo");
     return;
   }
-  
-  resultDiv.innerHTML = '<p>Generating random peer IDs...</p>';
-  
+
+  resultDiv.innerHTML = "<p>Generating random peer IDs...</p>";
+
   try {
     const ids = [];
     for (let i = 0; i < 5; i++) {
       const id = await generateRandomId();
       ids.push(id);
     }
-    
+
     resultDiv.innerHTML = `<p>Generated ${ids.length} random SHA1 IDs:</p>
       <ul style="font-family: monospace; list-style: none; padding: 0;">
-        ${ids.map(id => `<li>${id}</li>`).join('')}
+        ${ids.map((id) => `<li>${id}</li>`).join("")}
       </ul>`;
   } catch (err) {
     resultDiv.innerHTML = `<p style="color: red;">Error generating IDs: ${err.message}</p>`;
@@ -654,11 +813,10 @@ async function demonstrateSHA1() {
 // instead of overriding the send method
 
 // Make the DHT instance globally accessible (needed for auto-connection)
-window.initApp = async function() {
+window.initApp = async function () {
   window.dhtInstance = await initApp();
   return window.dhtInstance;
 };
 
 // Auto-initialize the app when loaded
-document.addEventListener('DOMContentLoaded', window.initApp);
-
+document.addEventListener("DOMContentLoaded", window.initApp);

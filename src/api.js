@@ -14,9 +14,9 @@ const pendingConnections = new Map();
 let signalingSocket = null;
 let dhtInstance = null;
 let uiAdapter = {
-  updateStatus: (message, isError = false) => _logDebug(isError ? `ERROR: ${message}` : `Status: ${message}`),
-  updatePeerList: (peerIds) => _logDebug("Available peers:", peerIds),
-  addMessage: (peerId, message, isOutgoing) => _logDebug(`Message ${isOutgoing ? 'to' : 'from'} ${peerId.substring(0,8)}: ${message}`),
+  updateStatus: (message, isError = false) => _logDebug?.(isError ? `ERROR: ${message}` : `Status: ${message}`),
+  updatePeerList: (peerIds) => _logDebug?.("Available peers:", peerIds),
+  addMessage: (peerId, message, isOutgoing) => _logDebug?.(`Message ${isOutgoing ? 'to' : 'from'} ${peerId.substring(0,8)}: ${message}`),
   getWebSocket: (url) => new WebSocket(url), // Browser default
   updateConnectedPeers: (peers) => {
     if (!peers || !peers.length) return;
@@ -69,15 +69,15 @@ export function initializeApi(dht, adapter, debug = false) {
     // Data should contain both the peer ID and the signal data
     if (data && data.id && data.signal) {
       const targetPeerId = data.id;
-      _logDebug("API: Sending signal to:", targetPeerId.substr(0, 8) + "...");
+      _logDebug?.("API: Sending signal to:", targetPeerId.substr(0, 8) + "...");
 
       // Check if this signal was already routed through the DHT
       if (data.viaDht) {
-        _logDebug(`API: Signal from ${targetPeerId.substr(0, 8)}... was received via DHT`);
+        _logDebug?.(`API: Signal from ${targetPeerId.substr(0, 8)}... was received via DHT`);
         // Report this as a DHT signal to the server for statistics
         const WS_OPEN = uiAdapter.getWebSocket ? 1 : WebSocket.OPEN; // 1 is the standard OPEN state
         if (signalingSocket && signalingSocket.readyState === WS_OPEN) {
-          _logDebug("API: Reporting DHT signal to server:", dhtInstance.nodeId, "->", targetPeerId);
+          _logDebug?.("API: Reporting DHT signal to server:", dhtInstance.nodeId, "->", targetPeerId);
           signalingSocket.send(
             JSON.stringify({
               type: "dht_signal_report",
@@ -100,12 +100,12 @@ export function initializeApi(dht, adapter, debug = false) {
       // When trickle is disabled, offers/answers should already include candidates
       // So we don't expect many ICE candidate messages
       if (isTrickleDisabled && isICECandidate) {
-        _logDebug(`API: Unexpected ICE candidate with trickle disabled for ${targetPeerId.substr(0, 8)}...`);
+        _logDebug?.(`API: Unexpected ICE candidate with trickle disabled for ${targetPeerId.substr(0, 8)}...`);
       }
       
       // For WebRTC signaling, always use the server to ensure reliable connection establishment
       if (isWebRTCSignal) {
-        _logDebug(`API: Using server for WebRTC offer/answer signal to ${targetPeerId.substr(0, 8)}...`);
+        _logDebug?.(`API: Using server for WebRTC offer/answer signal to ${targetPeerId.substr(0, 8)}...`);
         signalingSocket.send(
           JSON.stringify({
             type: "signal",
@@ -132,9 +132,9 @@ export function initializeApi(dht, adapter, debug = false) {
         // When trickle is disabled, we should still allow the server to handle candidates
         // but log the unexpected behavior
         if (isTrickleDisabled) {
-          _logDebug(`API: Using server for unexpected ICE candidate with trickle disabled for ${targetPeerId.substr(0, 8)}...`);
+          _logDebug?.(`API: Using server for unexpected ICE candidate with trickle disabled for ${targetPeerId.substr(0, 8)}...`);
         } else {
-          _logDebug(`API: Using server for ICE candidate signal to ${targetPeerId.substr(0, 8)}...`);
+          _logDebug?.(`API: Using server for ICE candidate signal to ${targetPeerId.substr(0, 8)}...`);
         }
         
         signalingSocket.send(
@@ -161,7 +161,7 @@ export function initializeApi(dht, adapter, debug = false) {
       // Check connection count for DHT signaling decision (logic adapted from browser.js)
       const isNewPeer = dhtInstance.peers.size <= 2;
       if (isNewPeer) {
-        _logDebug(`API: New peer with ${dhtInstance.peers.size} connections using server to signal ${targetPeerId.substr(0, 8)}...`);
+        _logDebug?.(`API: New peer with ${dhtInstance.peers.size} connections using server to signal ${targetPeerId.substr(0, 8)}...`);
         signalingSocket.send(
           JSON.stringify({
             type: "signal",
@@ -189,7 +189,7 @@ export function initializeApi(dht, adapter, debug = false) {
         if (dhtInstance.peers.has(targetPeerId)) {
           const directPeer = dhtInstance.peers.get(targetPeerId);
           if (directPeer && directPeer.connected) {
-             _logDebug(`API: Sending signal directly via DHT to peer ${targetPeerId.substr(0, 8)}...`);
+             _logDebug?.(`API: Sending signal directly via DHT to peer ${targetPeerId.substr(0, 8)}...`);
              directPeer.send({
                type: "SIGNAL",
                sender: dhtInstance.nodeId,
@@ -211,7 +211,7 @@ export function initializeApi(dht, adapter, debug = false) {
            const connectedPeers = Array.from(dhtInstance.peers.entries()).filter(([_, peer]) => peer.connected);
            if (connectedPeers.length > 0) {
               const [bootstrapPeerId, bootstrapPeer] = connectedPeers[0];
-              _logDebug(`API: Routing signal to ${targetPeerId.substr(0, 8)}... via bootstrap peer ${bootstrapPeerId.substr(0, 8)}...`);
+              _logDebug?.(`API: Routing signal to ${targetPeerId.substr(0, 8)}... via bootstrap peer ${bootstrapPeerId.substr(0, 8)}...`);
               bootstrapPeer.send({
                  type: "SIGNAL",
                  sender: dhtInstance.nodeId,
@@ -231,12 +231,12 @@ export function initializeApi(dht, adapter, debug = false) {
            }
         }
       } catch (err) {
-        _logDebug("API: Error routing through DHT:", err.message);
+        _logDebug?.("API: Error routing through DHT:", err.message);
       }
 
       // Fallback to server
       if (!signalSent) {
-        _logDebug(`API: Falling back to server for signal to ${targetPeerId.substr(0, 8)}...`);
+        _logDebug?.(`API: Falling back to server for signal to ${targetPeerId.substr(0, 8)}...`);
         signalingSocket.send(
           JSON.stringify({
             type: "signal",
@@ -255,13 +255,13 @@ export function initializeApi(dht, adapter, debug = false) {
 
   // Listen for peer connection events with peer: prefix
   dhtInstance.on("peer:connect", (peerId) => {
-    _logDebug(`API: Connected to peer: ${peerId.substring(0, 8)}...`);
+    _logDebug?.(`API: Connected to peer: ${peerId.substring(0, 8)}...`);
     connectedPeers.add(peerId);
     pendingConnections.delete(peerId);
     uiAdapter.updateStatus(`Connected to peer: ${peerId.substring(0, 8)}...`);
     // <<< ADDED: Update connected peers list >>>
-    _logDebug(`Updating connected peers list with ${connectedPeers.size} peers`);
-    _logDebug(`Peer disconnected - updating connected peers list to ${connectedPeers.size}`);
+    _logDebug?.(`Updating connected peers list with ${connectedPeers.size} peers`);
+    _logDebug?.(`Peer disconnected - updating connected peers list to ${connectedPeers.size}`);
     if (uiAdapter.updateConnectedPeers) {
       uiAdapter.updateConnectedPeers(Array.from(connectedPeers));
     }
@@ -271,7 +271,7 @@ export function initializeApi(dht, adapter, debug = false) {
     // Get the peer object from the DHT instance
     const peer = dhtInstance.peers.get(peerId);
     if (!peer) {
-      _logDebug(`API: Could not find peer object for ${peerId.substring(0, 8)}...`);
+      _logDebug?.(`API: Could not find peer object for ${peerId.substring(0, 8)}...`);
       return;
     }
 
@@ -279,20 +279,20 @@ export function initializeApi(dht, adapter, debug = false) {
     peer.on("data", (data) => {
       try {
         const message = JSON.parse(data.toString()); // Assuming JSON messages
-        _logDebug(`API: Data from ${peerId.substring(0, 8)}...:`, message);
+        _logDebug?.(`API: Data from ${peerId.substring(0, 8)}...:`, message);
         if (message.type === 'MESSAGE') {
            uiAdapter.addMessage(peerId, message.payload, false); // false = incoming
         }
         // Handle other message types if necessary
       } catch (err) {
-        _logDebug(`API: Error processing data from ${peerId.substring(0, 8)}...:`, err);
+        _logDebug?.(`API: Error processing data from ${peerId.substring(0, 8)}...:`, err);
         // Handle non-JSON data if needed
         uiAdapter.addMessage(peerId, `Received non-JSON data: ${data.toString()}`, false);
       }
     });
 
     peer.on("close", () => {
-      _logDebug(`API: Peer connection closed: ${peerId.substring(0, 8)}...`);
+      _logDebug?.(`API: Peer connection closed: ${peerId.substring(0, 8)}...`);
       connectedPeers.delete(peerId);
       pendingConnections.delete(peerId); // Remove if it was pending and closed
       uiAdapter.updateStatus(`Peer disconnected: ${peerId.substring(0, 8)}...`);
@@ -305,13 +305,13 @@ export function initializeApi(dht, adapter, debug = false) {
     });
 
      peer.on("error", (err) => {
-       _logDebug(`API: Peer connection error (${peerId.substring(0, 8)}...):`, err);
+       _logDebug?.(`API: Peer connection error (${peerId.substring(0, 8)}...):`, err);
        connectedPeers.delete(peerId);
        pendingConnections.delete(peerId);
        uiAdapter.updateStatus(`Peer error (${peerId.substring(0, 8)}...): ${err.message}`, true);
        // uiAdapter.updatePeerList([...connectedPeers]);
        // <<< ADDED: Update connected peers list >>>
-       _logDebug(`Peer error - updating connected peers list to ${connectedPeers.size}`);
+       _logDebug?.(`Peer error - updating connected peers list to ${connectedPeers.size}`);
        if (uiAdapter.updateConnectedPeers) {
          uiAdapter.updateConnectedPeers(Array.from(connectedPeers));
        }
@@ -320,14 +320,14 @@ export function initializeApi(dht, adapter, debug = false) {
 
   // Listen for general disconnection events with peer: prefix
   dhtInstance.on("peer:disconnect", (peerId, reason) => {
-    _logDebug(`API: Disconnected from peer: ${peerId.substring(0, 8)}... Reason: ${reason || 'unknown'}`);
+    _logDebug?.(`API: Disconnected from peer: ${peerId.substring(0, 8)}... Reason: ${reason || 'unknown'}`);
     connectedPeers.delete(peerId);
     pendingConnections.delete(peerId);
     uiAdapter.updateStatus(`Peer disconnected: ${peerId.substring(0, 8)}...`);
     // uiAdapter.updatePeerList([...connectedPeers]);
     // <<< ADDED: Update connected peers list >>>
-    _logDebug(`Updating connected peers list with ${connectedPeers.size} peers`);
-    _logDebug(`Peer disconnected - updating connected peers list to ${connectedPeers.size}`);
+    _logDebug?.(`Updating connected peers list with ${connectedPeers.size} peers`);
+    _logDebug?.(`Peer disconnected - updating connected peers list to ${connectedPeers.size}`);
     if (uiAdapter.updateConnectedPeers) {
       uiAdapter.updateConnectedPeers(Array.from(connectedPeers));
     }
@@ -337,12 +337,12 @@ export function initializeApi(dht, adapter, debug = false) {
   dhtInstance.on("peer:error", (data) => {
     const peerId = data.peer;
     const errorMsg = data.error;
-    _logDebug(`API: Peer error event for ${peerId.substring(0, 8)}...: ${errorMsg}`);
+    _logDebug?.(`API: Peer error event for ${peerId.substring(0, 8)}...: ${errorMsg}`);
     uiAdapter.updateStatus(`Peer error (${peerId.substring(0, 8)}...): ${errorMsg}`, true);
   });
 
   dhtInstance.on("peer:limit_reached", (peerId) => {
-    _logDebug(`API: Peer limit reached for ${peerId.substring(0, 8)}...`);
+    _logDebug?.(`API: Peer limit reached for ${peerId.substring(0, 8)}...`);
     uiAdapter.updateStatus(`Connection to ${peerId.substring(0, 8)}... failed: Peer limit reached`, true);
   });
 }
@@ -354,14 +354,14 @@ export function initializeApi(dht, adapter, debug = false) {
  */
 export function connectSignaling(url, options = {}) {
   if (!dhtInstance) {
-    _logDebug("API Error: DHT not initialized. Call initializeApi first.");
+    _logDebug?.("API Error: DHT not initialized. Call initializeApi first.");
     return;
   }
   
   const nodeId = dhtInstance.nodeId;
   const reconnectAttempts = options.reconnectAttempts || 0;
 
-  _logDebug("API: Connecting to signaling server...", url);
+  _logDebug?.("API: Connecting to signaling server...", url);
 
   // Close any existing connection
   const WS_CLOSED = uiAdapter.getWebSocket ? 3 : WebSocket.CLOSED; // 3 is the standard CLOSED state
@@ -373,7 +373,7 @@ export function connectSignaling(url, options = {}) {
   signalingSocket = uiAdapter.getWebSocket(url);
 
   signalingSocket.onopen = () => {
-    _logDebug("API: Connected to signaling server");
+    _logDebug?.("API: Connected to signaling server");
     uiAdapter.updateStatus("Connected to signaling server");
 
     // Dispatch connection event
@@ -382,7 +382,7 @@ export function connectSignaling(url, options = {}) {
     }));
 
     // Register this peer
-    _logDebug(`API: Registering as peer: ${nodeId}`);
+    _logDebug?.(`API: Registering as peer: ${nodeId}`);
     signalingSocket.send(
       JSON.stringify({
         type: "register",
@@ -392,7 +392,7 @@ export function connectSignaling(url, options = {}) {
   };
 
   signalingSocket.onerror = (error) => {
-    _logDebug("API: WebSocket error:", error);
+    _logDebug?.("API: WebSocket error:", error);
     uiAdapter.updateStatus("Signaling connection error", true);
     
     // Dispatch error event
@@ -402,7 +402,7 @@ export function connectSignaling(url, options = {}) {
   };
 
   signalingSocket.onclose = (event) => {
-    _logDebug("API: Disconnected from signaling server");
+    _logDebug?.("API: Disconnected from signaling server");
     uiAdapter.updateStatus("Disconnected from signaling server", true);
     
     // Dispatch disconnection event with clean/unclean status and attempts
@@ -420,12 +420,12 @@ export function connectSignaling(url, options = {}) {
   signalingSocket.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
-      _logDebug("API: Received:", data.type, data);
+      _logDebug?.("API: Received:", data.type, data);
 
       switch (data.type) {
         case "registered":
-          _logDebug(`API: Registered as peer: ${data.peerId}`);
-          _logDebug("API: Available peers:", data.peers);
+          _logDebug?.(`API: Registered as peer: ${data.peerId}`);
+          _logDebug?.("API: Available peers:", data.peers);
           if (data.peers && data.peers.length > 0) {
             uiAdapter.updateStatus(`Connected! ${data.peers.length} peers available`);
             uiAdapter.updatePeerList(data.peers);
@@ -444,13 +444,13 @@ export function connectSignaling(url, options = {}) {
 
         case "new_peer":
           if (data.peerId) {
-            _logDebug(`API: New peer joined: ${data.peerId}`);
+            _logDebug?.(`API: New peer joined: ${data.peerId}`);
             uiAdapter.updateStatus(`New peer discovered: ${data.peerId.substring(0, 8)}...`);
             
             if (data.peers) {
               uiAdapter.updatePeerList(data.peers);
             } else {
-              _logDebug("API: 'new_peer' message did not contain full peer list. UI might be incomplete.");
+              _logDebug?.("API: 'new_peer' message did not contain full peer list. UI might be incomplete.");
             }
             
             // Dispatch event for auto-connection
@@ -462,23 +462,23 @@ export function connectSignaling(url, options = {}) {
 
         case "peer_left":
            if (data.peerId) {
-             _logDebug(`API: Peer left: ${data.peerId}`);
+             _logDebug?.(`API: Peer left: ${data.peerId}`);
              uiAdapter.updateStatus(`Peer left: ${data.peerId.substring(0, 8)}...`);
              
              if (data.peers) {
                uiAdapter.updatePeerList(data.peers);
              } else {
-               _logDebug("API: 'peer_left' message did not contain full peer list. UI might be incomplete.");
+               _logDebug?.("API: 'peer_left' message did not contain full peer list. UI might be incomplete.");
              }
            }
            break;
 
         case "signal":
           if (!data.peerId || !data.signal) {
-            _logDebug("API: Invalid signal data received:", data);
+            _logDebug?.("API: Invalid signal data received:", data);
             return;
           }
-          _logDebug(`API: Signal from: ${data.peerId?.substring(0, 8)}...`, data.signal);
+          _logDebug?.(`API: Signal from: ${data.peerId?.substring(0, 8)}...`, data.signal);
 
           if (!connectedPeers.has(data.peerId) && !pendingConnections.has(data.peerId)) {
             pendingConnections.set(data.peerId, Date.now());
@@ -486,7 +486,7 @@ export function connectSignaling(url, options = {}) {
           }
 
           try {
-            _logDebug(`API: Processing signal from: ${data.peerId.substring(0, 8)}...`);
+            _logDebug?.(`API: Processing signal from: ${data.peerId.substring(0, 8)}...`);
             // Report server signal
             const WS_OPEN = uiAdapter.getWebSocket ? 1 : WebSocket.OPEN; // 1 is the standard OPEN state
             if (signalingSocket && signalingSocket.readyState === WS_OPEN) {
@@ -555,8 +555,8 @@ export async function connectPeer(peerId, forceInitiator = false, additionalOpti
 
     return peer;
   } catch (err) {
-    _logDebug("API: Failed to connect:", err);
-    uiAdapter.updateStatus(`Connection failed: ${err.message}`, true);
+    _logDebug?.("API: Failed to connect:", err);
+    uiAdapter.updateStatus(`😀 Connection failed: ${err.message}`, true);
     throw err;
   }
 }
@@ -797,8 +797,8 @@ export async function connectToPeer(peerId) {
     await connectPeer(peerId); 
     // Connection success is handled by the 'connect' event listener setup in initializeApi
   } catch (err) {
-    _logDebug(`API: Failed to connect to peer ${peerId.substring(0, 8)}...:`, err);
-    uiAdapter.updateStatus(`Failed to connect to ${peerId.substring(0, 8)}: ${err.message}`, true);
+    if (_logDebug) _logDebug(`API: Failed to connect to peer ${peerId.substring(0, 8)}...:`, err);
+    // uiAdapter.updateStatus(`Failed to connect to ${peerId.substring(0, 8)}: ${err.message}`, true);
     pendingConnections.delete(peerId);
   }
 }
