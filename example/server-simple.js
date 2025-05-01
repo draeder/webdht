@@ -18,6 +18,7 @@ const PORT = process.env.PORT || 3001;
 app.use(express.json());
 app.use('/', express.static(path.join(__dirname)));
 app.use('/src', express.static(path.join(__dirname, '..', 'src')));
+app.use('/transports', express.static(path.join(__dirname, '..', 'transports')));
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
@@ -61,7 +62,13 @@ wss.on('connection', (ws) => {
             peerId: peerId,
             signal: data.signal
           }));
-          console.log('Signal forwarded');
+          console.log('Signal forwarded from', peerId.substring(0, 8), 'to', data.target.substring(0, 8), 'Type:', data.signal.type || 'candidate');
+          if (data.signal.sdp) {
+            console.log('SDP snippet:', data.signal.sdp.substring(0, 120) + '...');
+          }
+          if (data.signal.candidate) {
+            console.log('ICE candidate:', data.signal.candidate.candidate.substring(0, 80) + '...');
+          }
         } else {
           ws.send(JSON.stringify({
             type: 'error',

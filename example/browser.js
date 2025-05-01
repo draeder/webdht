@@ -11,17 +11,23 @@ import WebDHT, { generateRandomId } from "/src/index.js";
 // Import the consolidated API functions
 import {
   initializeApi,
-  connectSignaling,
   connectToPeer,
   sendMessageToPeer,
   startDhtPeerDiscovery,
   stopDhtPeerDiscovery, // Assuming this might be needed later
   putValue, // Assuming this might be needed later
   getValue, // Assuming this might be needed later
-} from "../src/api.js";
+} from "/src/api.js";
 
-// Track connection attempts to prevent duplicate connections
-const connectionAttempts = new Set();
+// Import the transport manager
+import transportManager from "../transports/index.js";
+
+// Track connection attempts with metadata (peer ID, timestamps, retry counts, etc.)
+const connectionAttempts = new Map();
+
+// Signal timeout configuration
+const SIGNAL_TIMEOUT = 15000; // 15 seconds timeout for signal exchange
+const MAX_CONNECTION_RETRIES = 5; // Maximum number of connection retries
 
 // UI Elements Cache
 const uiElements = {};
@@ -145,7 +151,9 @@ const browserUiAdapter = {
     uiElements.chatMessages.scrollTop = uiElements.chatMessages.scrollHeight;
   },
   // Provide the browser's WebSocket implementation
-  getWebSocket: (url) => new WebSocket(url),
+  getWebSocket: (url) => transportManager.getWebSocket(url),
+  // Transport instance
+  webSocketTransport: null,
   // New function to update the list of *connected* peers
   updateConnectedPeers: (connectedPeerIds) => {
     const peersDiv = uiElements.peers; // Assuming 'peers' is cached
@@ -245,8 +253,8 @@ const dhtOptions = {
   maxPeers: 3,
   debug: false,
   dhtSignalThreshold: 2,
-  dhtRouteRefreshInterval: 15000,
-  aggressiveDiscovery: true,
+  aggressiveDiscovery: false,
+  dhtRouteRefreshInterval: 60000, // Less frequent route refresh
   simplePeerOptions: {
     config: {
       iceServers: [
@@ -275,17 +283,30 @@ const dhtOptions = {
       iceCandidatePoolSize: 10,
       iceTransportPolicy: "all",
     },
-    trickle: false,
-    sdpTransform: (sdp) =>
-      sdp
-        .replace(
-          /a=ice-options:trickle\r\n/g,
-          "a=ice-options:trickle renomination\r\n"
-        )
-        .replace(
-          /a=setup:actpass\r\n/g,
-          "a=setup:actpass\r\na=connection-timeout:10\r\n"
-        ),
+    // Enable trickle for faster connection establishment
+    trickle: true,
+    // Improved SDP transformation to be more robust to WebRTC spec changes
+    sdpTransform: (sdp) => {
+      // Ensure we have ice-options:trickle for better connectivity
+      if (!sdp.includes('a=ice-options:trickle')) {
+        sdp = sdp.replace(/a=ice-options:/g, 'a=ice-options:trickle ');
+      } else {
+        // Add renomination for better candidate selection
+        sdp = sdp.replace(/a=ice-options:trickle\r\n/g, 'a=ice-options:trickle renomination\r\n');
+      }
+      
+      // Increase connection timeout for complex NAT scenarios
+      if (!sdp.includes('a=connection-timeout')) {
+        sdp = sdp.replace(/a=setup:actpass\r\n/g, 'a=setup:actpass\r\na=connection-timeout:30\r\n');
+      }
+      
+      // Ensure proper ICE restart support
+      if (!sdp.includes('a=ice-options:renomination')) {
+        sdp = sdp.replace(/a=ice-options:/g, 'a=ice-options:renomination ');
+      }
+      
+      return sdp;
+    },
   },
 };
 
@@ -320,6 +341,155 @@ async function initApp() {
       );
     }
 
+    // Set up DHT event handler for signals to be sent through the transport
+    dht.on("signal", async (data) => {
+      // Validate signal before forwarding
+      if (!data) {
+        console.error('Empty signal received');
+        return;
+      }
+
+      // Check for remote peer ID validity
+      if (!data.id || typeof data.id !== 'string' || data.id.length !== 40) {
+        console.error('Invalid peer ID in signal:', data);
+        return;
+      }
+
+      const targetPeerId = data.id;
+      const peerShortId = targetPeerId.substring(0, 8);
+
+      // Implement signal cancellation and rate limiting for peers
+      if (connectionAttempts.has(targetPeerId)) {
+        const peerState = connectionAttempts.get(targetPeerId);
+        const now = Date.now();
+        
+        // If peer marked as unavailable, drop signals
+        if (peerState.status === 'unavailable') {
+          console.log(`Dropping signal to unavailable peer ${peerShortId}...`);
+          return;
+        }
+        
+        // Rate limit PING signals to once every 10 seconds per peer
+        if (data.signal.type === 'PING') {
+          const lastPingTime = peerState.lastPingTime || 0;
+          if (now - lastPingTime < 10000) {
+            // Silently drop excessive pings
+            return;
+          }
+          // Update last ping time
+          peerState.lastPingTime = now;
+          connectionAttempts.set(targetPeerId, peerState);
+        }
+        
+        // If this is a new signal attempt with a peer we've previously tried to connect to
+        if (!peerState.signalStartTime) {
+          // Set signal start time for timeout tracking
+          peerState.signalStartTime = Date.now();
+          
+          // Create a timeout to detect stalled signal exchanges
+          const timeoutId = setTimeout(() => {
+            console.warn(`Signal exchange with ${peerShortId}... timed out after ${SIGNAL_TIMEOUT}ms`);
+            
+            // Update connection state
+            if (connectionAttempts.has(targetPeerId)) {
+              const currentState = connectionAttempts.get(targetPeerId);
+              const retryCount = (currentState.retries || 0) + 1;
+              
+              if (retryCount > MAX_CONNECTION_RETRIES) {
+                // Mark peer as temporarily unavailable after max retries
+                connectionAttempts.set(targetPeerId, {
+                  ...currentState,
+                  status: 'unavailable',
+                  retries: retryCount,
+                  lastTried: Date.now()
+                });
+                
+                browserUiAdapter.updateStatus(
+                  `Connection to ${peerShortId}... failed after ${MAX_CONNECTION_RETRIES} attempts`,
+                  true
+                );
+              } else {
+                // Track retry attempt
+                connectionAttempts.set(targetPeerId, {
+                  ...currentState,
+                  status: 'timeout',
+                  retries: retryCount,
+                  lastTried: Date.now()
+                });
+              }
+            }
+          }, SIGNAL_TIMEOUT);
+          
+          // Store the timeout ID so we can clear it if connection succeeds
+          peerState.timeoutId = timeoutId;
+          connectionAttempts.set(targetPeerId, peerState);
+        }
+      } else {
+        // New connection attempt
+        connectionAttempts.set(targetPeerId, {
+          status: 'signaling',
+          signalStartTime: Date.now(),
+          retries: 0
+        });
+      }
+      
+      // Validate signal structure
+      if (!browserUiAdapter.webSocketTransport?.connected) {
+        console.error('WebSocket transport not connected');
+        browserUiAdapter.updateStatus('Cannot send signal: Signaling server disconnected', true);
+        return;
+      }
+      
+      if (!data.signal || typeof data.signal !== 'object' || !data.signal.type) {
+        console.error('Invalid signal structure:', data);
+        return;
+      }
+      
+      // Validate signal type - include PING as a valid type
+      if (!['offer', 'answer', 'candidate', 'renegotiate', 'PING'].includes(data.signal.type)) {
+        console.warn(`Unknown signal type: ${data.signal.type} - allowing it anyway for compatibility`);
+        // Don't return/block unknown signal types, just log a warning
+      }
+      
+      // Only log non-PING signals to reduce console noise
+      if (data.signal.type !== 'PING') {
+        console.log(`Sending validated ${data.signal.type} signal to ${peerShortId}...`);
+      }
+      
+      // Validate signal contents based on type
+      if (data.signal.type === 'offer' && !data.signal.sdp) {
+        console.error('Invalid offer signal: missing SDP', data);
+        return;
+      }
+      if (data.signal.type === 'answer' && !data.signal.sdp) {
+        console.error('Invalid answer signal: missing SDP', data);
+        return;
+      }
+      if (data.signal.type === 'candidate' && !data.signal.candidate) {
+        console.error('Invalid ICE candidate: missing candidate', data);
+        return;
+      }
+      
+      // Signal validation passed, send through transport
+      try {
+        browserUiAdapter.webSocketTransport.signal(targetPeerId, data.signal);
+      } catch (err) {
+        console.error('Signal transport error:', err);
+        browserUiAdapter.updateStatus(`Signal error: ${err.message}`, true);
+        
+        // Update connection attempt state
+        if (connectionAttempts.has(targetPeerId)) {
+          const currentState = connectionAttempts.get(targetPeerId);
+          connectionAttempts.set(targetPeerId, {
+            ...currentState,
+            status: 'error',
+            lastError: err.message,
+            lastErrorTime: Date.now()
+          });
+        }
+      }
+    });
+
     // Set up the UI event listeners (buttons, inputs etc.) - Moved outside 'ready' handler
     setupUIEventListeners();
 
@@ -333,7 +503,7 @@ async function initApp() {
 
       // Automatically connect to signaling server on ready
       console.log("Auto-connecting to signaling server...");
-      connectToSignalingServerWithRetry(defaultWsUrl); // Use our new connection function with retry
+      connectToSignalingServerWithRetry(defaultWsUrl); // Use our new connection function with WebSocketTransport
 
       console.log("Your peer ID is:", nodeId);
       console.log("Signal batching and compression enabled");
@@ -357,7 +527,7 @@ async function initApp() {
 }
 
 /**
- * Connect to signaling server with automatic reconnection logic
+ * Connect to signaling server with automatic reconnection logic using WebSocketTransport
  * @param {string} url - The WebSocket URL to connect to
  */
 function connectToSignalingServerWithRetry(url) {
@@ -373,57 +543,221 @@ function connectToSignalingServerWithRetry(url) {
   browserUiAdapter.updateConnectionStatus("Connecting to signaling server...");
   browserUiAdapter.updateStatus("Connecting to signaling server...");
 
-  // Use the API's connectSignaling function
-  connectSignaling(url);
+  // Create a WebSocketTransport instance if we don't have one already
+  if (!browserUiAdapter.webSocketTransport) {
+    const transport = transportManager.create('websocket', {
+      url: url,
+      autoReconnect: true,
+      // Proper exponential backoff with jitter for reconnection
+      reconnectDelay: (retryCount) => {
+        // Base delay starts at 1s and increases exponentially
+        const baseDelay = Math.min(30000, 1000 * Math.pow(2, retryCount));
+        // Add jitter of ±30% to prevent thundering herd problem
+        return baseDelay * (0.7 + Math.random() * 0.6);
+      },
+      // Set reasonable maximum retry limit to prevent infinite reconnection attempts
+      maxReconnectAttempts: 10,
+      // Faster initial backoff, then slower increase
+      reconnectBackoffMultiplier: 1.5,
+      // Store peer information between reconnects
+      preservePeerInfo: true,
+      debug: dhtOptions.debug
+    });
 
-  // Setup the reconnection logic and custom message handling using event listeners
-  // rather than modifying WebSocket.prototype (which causes illegal invocation errors)
-  document.addEventListener("signaling:connected", () => {
-    browserUiAdapter.updateConnectionStatus("Connected to signaling server");
-  });
+    // Store the transport instance in the UI adapter for access
+    browserUiAdapter.webSocketTransport = transport;
 
-  document.addEventListener("signaling:disconnected", (event) => {
-    const wasClean = event.detail?.wasClean || false;
-    if (!wasClean) {
-      browserUiAdapter.updateStatus(
-        "Signaling connection lost. Attempting to reconnect...",
-        true
-      );
-      browserUiAdapter.updateConnectionStatus(
-        "Connection lost. Reconnecting..."
-      );
+    // Set up event listeners for the transport
+    transport.on('connect', () => {
+      browserUiAdapter.updateConnectionStatus("Connected to signaling server");
+      browserUiAdapter.updateStatus("Connected to signaling server");
+      
+      // Register with the transport if we have a DHT node ID
+      if (window.dhtInstance && window.dhtInstance.nodeId) {
+        transport.register(window.dhtInstance.nodeId);
+      }
+    });
 
-      // Schedule reconnection with exponential backoff
-      const reconnectAttempts = event.detail?.attempts || 1;
-      const delay = Math.min(30000, Math.pow(2, reconnectAttempts) * 1000);
+    transport.on('registered', (peerId, peers) => {
+      browserUiAdapter.updateStatus(`Registered with ID: ${peerId}`);
+      browserUiAdapter.updateStatus(`Available peers: ${peers.length}`);
+      browserUiAdapter.updatePeerList(peers);
+      
+      // Dispatch event for auto-connection similar to api.js
+      if (peers.length > 0) {
+        document.dispatchEvent(new CustomEvent('api:registered', {
+          detail: { peers: peers }
+        }));
+      }
+    });
 
-      browserUiAdapter.updateStatus(
-        `Will attempt to reconnect in ${delay / 1000} seconds...`
-      );
+    transport.on('new_peer', (peerId) => {
+      browserUiAdapter.updateStatus(`New peer discovered: ${peerId.substring(0, 8)}...`);
+      
+      // Update the peer list with all registered peers
+      const allPeers = transport.getRegisteredPeers();
+      browserUiAdapter.updatePeerList(allPeers);
+      
+      // Dispatch event for auto-connection similar to api.js
+      document.dispatchEvent(new CustomEvent('api:new_peer', {
+        detail: { peerId: peerId }
+      }));
+    });
 
-      setTimeout(() => {
-        browserUiAdapter.updateStatus(
-          `Reconnecting to signaling server (attempt ${reconnectAttempts})...`
-        );
-        browserUiAdapter.updateConnectionStatus(
-          `Reconnecting (attempt ${reconnectAttempts})...`
-        );
-        connectSignaling(url, { reconnectAttempts });
-      }, delay);
-    } else {
-      browserUiAdapter.updateConnectionStatus(
-        "Disconnected from signaling server"
-      );
-    }
-  });
+    transport.on('signal', (peerId, signal) => {
+      // Process and validate incoming signals with consistent validation
+      if (!window.dhtInstance) {
+        console.error('DHT instance not available for signal processing');
+        return;
+      }
+      
+      // Validate peer ID format
+      if (!peerId || typeof peerId !== 'string' || peerId.length !== 40) {
+        console.error('Invalid peer ID in incoming signal:', peerId);
+        return;
+      }
+      
+      const peerShortId = peerId.substring(0, 8);
+      
+      // Validate signal structure
+      if (!signal || typeof signal !== 'object' || !signal.type) {
+        console.error('Invalid signal structure from server:', signal);
+        browserUiAdapter.updateStatus(`Malformed signal from ${peerShortId}...`, true);
+        
+        // Track problematic peer signals
+        const peerState = connectionAttempts.get(peerId) || {
+          status: 'error',
+          errorCount: 0,
+          firstErrorTime: Date.now()
+        };
+        
+        peerState.errorCount++;
+        peerState.lastErrorTime = Date.now();
+        connectionAttempts.set(peerId, peerState);
+        
+        // If we see consistent errors from a peer, implement recovery strategy
+        if (peerState.errorCount > 3 && peerState.errorCount <= 5) {
+          // Attempt reconnection after several errors
+          const timeSinceFirstError = Date.now() - peerState.firstErrorTime;
+          if (timeSinceFirstError > 30000) { // Only if errors persisted for > 30s
+            console.log(`Attempting transport recovery due to bad signals from ${peerShortId}...`);
+            
+            // Implement exponential backoff with jitter
+            const backoffDelay = Math.min(
+              30000, // Cap at 30 seconds max delay
+              1000 * Math.pow(1.5, peerState.errorCount) * (0.5 + Math.random()) // Base exponential backoff with jitter
+            );
+            
+            // Schedule reconnection
+            setTimeout(() => {
+              if (browserUiAdapter.webSocketTransport?.connected) {
+                console.log(`Reconnecting transport after backoff`);
+                browserUiAdapter.webSocketTransport.disconnect();
+                setTimeout(() => browserUiAdapter.webSocketTransport.connect(), 500);
+              }
+            }, backoffDelay);
+          }
+        } else if (peerState.errorCount > 5) {
+          // Mark peer as temporarily unavailable after too many errors
+          peerState.status = 'unavailable';
+          connectionAttempts.set(peerId, peerState);
+          console.warn(`Marked peer ${peerShortId}... as unavailable due to persistent signal errors`);
+        }
+        return;
+      }
+      
+      // Validate signal type - make consistent with outgoing signal validation
+      if (!['offer', 'answer', 'candidate', 'renegotiate', 'PING'].includes(signal.type)) {
+        console.error('Unknown signal type from server:', signal.type);
+        return;
+      }
+      
+      // Skip further processing for PING signals - they're just keepalives
+      if (signal.type === 'PING') {
+        // Just acknowledge we received a ping, no need to process further
+        return;
+      }
+      
+      // Validate signal contents based on type
+      let isValidSignal = true;
+      let validationError = '';
+      
+      if ((signal.type === 'offer' || signal.type === 'answer') && !signal.sdp) {
+        isValidSignal = false;
+        validationError = `Invalid ${signal.type} signal: missing SDP`;
+      } else if (signal.type === 'candidate' && !signal.candidate) {
+        isValidSignal = false;
+        validationError = 'Invalid ICE candidate: missing candidate data';
+      }
+      
+      if (!isValidSignal) {
+        console.error(validationError, signal);
+        browserUiAdapter.updateStatus(`${validationError} from ${peerShortId}...`, true);
+        return;
+      }
+      
+      // Handle partial/corrupted signals - attempt repair for candidate signals
+      if (signal.type === 'candidate' && signal.candidate) {
+        // Fix potentially corrupted ICE candidate strings
+        if (typeof signal.candidate === 'string' &&
+            !signal.candidate.includes('candidate:') &&
+            !signal.candidate.includes('a=candidate:')) {
+          console.warn('Attempting to repair malformed ICE candidate:', signal.candidate);
+          // Try to add the missing prefix
+          signal.candidate = 'candidate:' + signal.candidate;
+        }
+      }
+      
+      // Signal validation passed, forward to DHT
+      try {
+        console.log(`Processing valid ${signal.type} signal from ${peerShortId}...`);
+        
+        // Clear any timeouts for this peer's connection
+        if (connectionAttempts.has(peerId)) {
+          const peerState = connectionAttempts.get(peerId);
+          if (peerState.timeoutId) {
+            clearTimeout(peerState.timeoutId);
+          }
+          
+          // Update peer state to reflect active signaling
+          connectionAttempts.set(peerId, {
+            ...peerState,
+            status: 'active',
+            lastSignalTime: Date.now(),
+            timeoutId: null,
+            // Reset error count if we receive valid signals
+            errorCount: 0
+          });
+        }
+        
+        // Forward validated signal to DHT
+        window.dhtInstance.signal({
+          id: peerId,
+          signal: signal,
+          viaDht: false
+        });
+      } catch (err) {
+        console.error('Error processing signal:', err);
+        browserUiAdapter.updateStatus(`Signal processing error: ${err.message}`, true);
+      }
+    });
 
-  document.addEventListener("signaling:error", () => {
-    browserUiAdapter.updateStatus("Signaling connection error", true);
-    browserUiAdapter.updateConnectionStatus("Connection error");
-  });
+    transport.on('disconnect', () => {
+      browserUiAdapter.updateStatus("Disconnected from signaling server", true);
+      browserUiAdapter.updateConnectionStatus("Disconnected from signaling server");
+    });
 
-  // These events will be dispatched from the api.js connectSignaling handler
-  // when it processes these signaling server messages
+    transport.on('error', (err) => {
+      browserUiAdapter.updateStatus(`Signaling connection error: ${err.message}`, true);
+      browserUiAdapter.updateConnectionStatus("Connection error");
+    });
+
+    // Connect to the signaling server
+    transport.connect();
+  } else {
+    // If we already have a transport instance, just reconnect it
+    browserUiAdapter.webSocketTransport.connect(url);
+  }
 }
 
 /**
@@ -448,17 +782,11 @@ function isValidSignalingUrl(url) {
  */
 function attemptAutomaticPeerConnection(peerId) {
   if (!peerId) return;
+  
+  const peerShortId = peerId.substring(0, 8);
 
-  // Skip if we're already attempting to connect to this peer
-  if (connectionAttempts.has(peerId)) {
-    console.log(
-      `Skipping auto-connect to ${peerId} - connection already in progress`
-    );
-    return;
-  }
-
-  // Use lexicographical comparison to determine who initiates the connection
-  const dhtInstance = window.dhtInstance; // Assuming it's globally accessible
+  // Get current DHT instance
+  const dhtInstance = window.dhtInstance;
   if (!dhtInstance) {
     console.error("DHT instance not available for auto-connection");
     return;
@@ -466,32 +794,144 @@ function attemptAutomaticPeerConnection(peerId) {
 
   // Skip if we're already connected to this peer
   if (dhtInstance.peers.has(peerId)) {
-    console.log(`Already connected to peer: ${peerId}`);
+    console.log(`Already connected to peer: ${peerShortId}...`);
     return;
   }
 
+  // Check connection attempt state
+  if (connectionAttempts.has(peerId)) {
+    const peerState = connectionAttempts.get(peerId);
+    
+    // Prevent duplicate connection attempts
+    if (peerState.status === 'connecting' || peerState.status === 'signaling') {
+      console.log(
+        `Skipping auto-connect to ${peerShortId}... - connection already in progress (${peerState.status})`
+      );
+      return;
+    }
+    
+    // Check if we recently tried and failed to connect to this peer
+    if (peerState.status === 'failed' || peerState.status === 'timeout') {
+      const retryCount = peerState.retries || 0;
+      
+      // Check if we've reached the maximum retry limit
+      if (retryCount >= MAX_CONNECTION_RETRIES) {
+        console.log(
+          `Skipping auto-connect to ${peerShortId}... - reached maximum retry limit (${MAX_CONNECTION_RETRIES})`
+        );
+        
+        // Allow retrying after a longer cooldown period (5 minutes)
+        const lastAttemptTime = peerState.lastTried || 0;
+        const now = Date.now();
+        if (now - lastAttemptTime < 5 * 60 * 1000) {
+          return;
+        }
+        
+        console.log(`Retry cooldown period elapsed for ${peerShortId}... - attempting final retry`);
+        // Reset retry count after cooldown
+        peerState.retries = 0;
+      }
+      
+      // Calculate exponential backoff delay with jitter
+      const baseDelay = Math.min(
+        30000, // Cap at 30 seconds
+        1000 * Math.pow(2, retryCount)
+      );
+      const jitterFactor = 0.7 + Math.random() * 0.6; // 30% jitter
+      const delayWithJitter = Math.floor(baseDelay * jitterFactor);
+      
+      // Only retry if enough time has passed since last attempt
+      const lastAttemptTime = peerState.lastTried || 0;
+      const now = Date.now();
+      if (now - lastAttemptTime < delayWithJitter) {
+        console.log(
+          `Skipping auto-connect to ${peerShortId}... - in backoff period (${Math.floor((delayWithJitter - (now - lastAttemptTime)) / 1000)}s remaining)`
+        );
+        return;
+      }
+    }
+    
+    // Handle unavailable peers
+    if (peerState.status === 'unavailable') {
+      const lastAttemptTime = peerState.lastTried || 0;
+      const now = Date.now();
+      // Only retry unavailable peers after a much longer timeout (15 minutes)
+      if (now - lastAttemptTime < 15 * 60 * 1000) {
+        console.log(`Skipping auto-connect to unavailable peer ${peerShortId}...`);
+        return;
+      }
+      
+      console.log(`Unavailable peer ${peerShortId}... cooldown elapsed - attempting reconnection`);
+    }
+  }
+
+  // Use lexicographical comparison to determine who initiates the connection
   const shouldInitiate = dhtInstance.nodeId < peerId;
 
   if (shouldInitiate) {
-    console.log(`Auto-connecting to peer: ${peerId} (we are initiator)`);
+    console.log(`Auto-connecting to peer: ${peerShortId}... (we are initiator)`);
     browserUiAdapter.updateStatus(
-      `Auto-connecting to peer: ${peerId.substring(0, 8)}...`
+      `Auto-connecting to peer: ${peerShortId}...`
     );
 
-    // Add to connection attempts set
-    connectionAttempts.add(peerId);
-
-    // Log attempt for debugging
-    console.log(
-      `Connection attempts before: ${Array.from(connectionAttempts)}`
-    );
+    // Update connection attempt state
+    const retryCount = connectionAttempts.has(peerId) ?
+      (connectionAttempts.get(peerId).retries || 0) : 0;
+      
+    connectionAttempts.set(peerId, {
+      status: 'connecting',
+      startTime: Date.now(),
+      retries: retryCount,
+      lastTried: Date.now()
+    });
 
     // Attempt connection with a small delay to ensure signaling is ready
     setTimeout(() => {
+      // Double-check we haven't connected in the meantime
+      if (dhtInstance.peers.has(peerId)) {
+        console.log(`Already connected to peer ${peerShortId}... before attempt started`);
+        
+        // Update state
+        if (connectionAttempts.has(peerId)) {
+          connectionAttempts.set(peerId, {
+            ...connectionAttempts.get(peerId),
+            status: 'connected'
+          });
+        }
+        return;
+      }
+      
+      // Analyze failure causes from past attempts
+      const peerState = connectionAttempts.get(peerId);
+      let connectionTimeoutMs = 30000; // Default 30s timeout
+      
+      // Adjust timeout based on failure history
+      if (peerState && peerState.lastError) {
+        if (peerState.lastError.includes('ICE') || peerState.lastError.includes('connectivity')) {
+          // Extend timeout for NAT traversal issues
+          connectionTimeoutMs = 45000;
+          console.log(`Extending connection timeout for potentially complex NAT scenario`);
+        }
+      }
+      
+      // Store connection start time for timeout tracking
+      connectionAttempts.set(peerId, {
+        ...connectionAttempts.get(peerId),
+        connectionStartTime: Date.now()
+      });
+      
+      // Attempt the connection
       connectToPeer(peerId)
         .then(() => {
-          console.log(`Auto-connected to peer: ${peerId}`);
-          connectionAttempts.delete(peerId);
+          console.log(`Auto-connected to peer: ${peerShortId}...`);
+          
+          // Update connection state
+          connectionAttempts.set(peerId, {
+            ...connectionAttempts.get(peerId),
+            status: 'connected',
+            connectedAt: Date.now()
+          });
+          
           // Ensure UI reflects the new connection
           if (browserUiAdapter.updateConnectedPeers && dhtInstance.peers) {
             const connectedPeerIds = Array.from(dhtInstance.peers.keys());
@@ -499,30 +939,63 @@ function attemptAutomaticPeerConnection(peerId) {
           }
         })
         .catch((err) => {
-          console.error(
-            `Auto-connect failed: ${err && err.message ? err.message : err}`
-          );
+          const errorMsg = err && err.message ? err.message : String(err);
+          console.error(`Auto-connect failed: ${errorMsg}`);
+          
           browserUiAdapter.updateStatus(
-            `Auto-connect to ${peerId.substring(0, 8)}... failed: ${
-              err.message
-            }`,
+            `Auto-connect to ${peerShortId}... failed: ${errorMsg}`,
             true
           );
-          connectionAttempts.delete(peerId);
-
-          // Retry after a delay if this was a timing issue
-          if (
-            err.message &&
-            (err.message.includes("timeout") ||
-              err.message.includes("failed to connect"))
-          ) {
-            console.log(`Will retry connection to ${peerId} after delay`);
-            setTimeout(() => attemptAutomaticPeerConnection(peerId), 5000);
+          
+          // Update connection state with error details for analysis
+          const currentState = connectionAttempts.get(peerId) || {};
+          const newRetryCount = (currentState.retries || 0) + 1;
+          
+          connectionAttempts.set(peerId, {
+            ...currentState,
+            status: 'failed',
+            lastError: errorMsg,
+            lastTried: Date.now(),
+            retries: newRetryCount
+          });
+          
+          // Analyze error type to determine if retry is appropriate
+          const shouldRetry = errorMsg.includes("timeout") ||
+                             errorMsg.includes("failed to connect") ||
+                             errorMsg.includes("ICE") ||
+                             errorMsg.includes("connection") ||
+                             errorMsg.includes("signal");
+                             
+          if (shouldRetry && newRetryCount <= MAX_CONNECTION_RETRIES) {
+            console.log(`Will retry connection to ${peerShortId}... (attempt ${newRetryCount}/${MAX_CONNECTION_RETRIES})`);
+            
+            // Implement exponential backoff with jitter
+            const baseDelay = Math.min(30000, 1000 * Math.pow(2, newRetryCount));
+            const jitterFactor = 0.7 + Math.random() * 0.6; // 30% jitter
+            const delayWithJitter = Math.floor(baseDelay * jitterFactor);
+            
+            setTimeout(() => attemptAutomaticPeerConnection(peerId), delayWithJitter);
+          } else if (newRetryCount > MAX_CONNECTION_RETRIES) {
+            console.log(`Not retrying connection to ${peerShortId}... - reached maximum retry limit`);
+            
+            // Update status to reflect giving up
+            connectionAttempts.set(peerId, {
+              ...connectionAttempts.get(peerId),
+              status: 'maxRetries'
+            });
+          } else {
+            console.log(`Not retrying connection to ${peerShortId}... - error type indicates retry wouldn't help`);
           }
         });
     }, 1000);
   } else {
-    console.log(`Waiting for peer ${peerId} to initiate connection to us`);
+    console.log(`Waiting for peer ${peerShortId}... to initiate connection to us`);
+    
+    // Store information that we're waiting for this peer to connect to us
+    connectionAttempts.set(peerId, {
+      status: 'waiting',
+      startTime: Date.now()
+    });
   }
 }
 
@@ -561,7 +1034,7 @@ function setupUIEventListeners() {
   safeAddEventListener("connectSignalingBtn", "onclick", () => {
     const url = uiElements.signalingUrl.value;
     if (url) {
-      connectToSignalingServerWithRetry(url); // Use our new connection function with retry
+      connectToSignalingServerWithRetry(url); // Use our new connection function with WebSocketTransport
     } else {
       browserUiAdapter.updateStatus(
         "Please enter a signaling server URL.",
@@ -809,14 +1282,22 @@ async function demonstrateSHA1() {
   }
 }
 
-// We now handle WebSocket messages directly in the onmessage handler
-// instead of overriding the send method
+// We use WebSocketTransport for signaling server communication
+// instead of direct WebSocket connections
 
 // Make the DHT instance globally accessible (needed for auto-connection)
 window.initApp = async function () {
   window.dhtInstance = await initApp();
   return window.dhtInstance;
 };
+
+// Properly clean up resources when window is closed or refreshed
+window.addEventListener('beforeunload', () => {
+  if (browserUiAdapter.webSocketTransport) {
+    console.log("Cleaning up WebSocketTransport...");
+    browserUiAdapter.webSocketTransport.destroy();
+  }
+});
 
 // Auto-initialize the app when loaded
 document.addEventListener("DOMContentLoaded", window.initApp);

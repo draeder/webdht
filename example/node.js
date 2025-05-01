@@ -1,11 +1,11 @@
 import WebDHT from "../src/index.js";
-import WebSocket from "ws";
 import readline from "readline";
-import { 
-  initializeApi, 
+import transportManager from "../transports/index.js";
+import {
+  initializeApi,
   connectSignaling,
-  putValue, 
-  getValue, 
+  putValue,
+  getValue,
   connectToPeer,
   sendMessageToPeer
 } from "../src/api.js";
@@ -51,28 +51,202 @@ const nodeAdapter = {
   getWebSocket: (url) => {
     if (!url) {
       console.warn("API: Empty WebSocket URL provided");
+      const WebSocketClass = transportManager.getWebSocket();
       return {
-        OPEN: WebSocket.OPEN,
-        CLOSED: WebSocket.CLOSED,
+        OPEN: WebSocketClass.OPEN,
+        CLOSED: WebSocketClass.CLOSED,
       };
     }
     try {
-      const ws = new WebSocket(url);
-      return Object.defineProperties(ws, {
-        OPEN: {
-          get: () => WebSocket.OPEN,
-          enumerable: true,
+      const wsTransport = transportManager.create('websocket', { url });
+      
+      // Create a wrapper that adapts WebSocketTransport to the WebSocket API
+      const wsWrapper = {
+        // Properties
+        _handlers: {
+          open: null,
+          close: null,
+          error: null,
+          message: null
         },
-        CLOSED: {
-          get: () => WebSocket.CLOSED,
-          enumerable: true,
+        
+        // Methods
+        send: (data) => {
+          // API sends JSON strings, so we parse them
+          try {
+            const parsedData = JSON.parse(data);
+            return wsTransport.send(parsedData);
+          } catch (err) {
+            console.error('Failed to parse WebSocket data:', err);
+            return false;
+          }
         },
+        
+        close: () => wsTransport.disconnect(),
+        
+        // Event handlers with getters/setters
+        get onopen() { return this._handlers.open; },
+        set onopen(handler) {
+          this._handlers.open = handler;
+          if (handler) {
+            wsTransport.on('connect', () => {
+              if (this._handlers.open) this._handlers.open();
+            });
+          }
+        },
+        
+        get onclose() { return this._handlers.close; },
+        set onclose(handler) {
+          this._handlers.close = handler;
+          if (handler) {
+            wsTransport.on('disconnect', (event) => {
+              if (this._handlers.close) this._handlers.close({
+                wasClean: true,  // Assume clean by default
+                code: 1000,      // Normal closure
+                reason: ''
+              });
+            });
+          }
+        },
+        
+        get onerror() { return this._handlers.error; },
+        set onerror(handler) {
+          this._handlers.error = handler;
+          if (handler) {
+            wsTransport.on('error', (err) => {
+              if (this._handlers.error) this._handlers.error(err);
+            });
+          }
+        },
+        
+        get onmessage() { return this._handlers.message; },
+        set onmessage(handler) {
+          this._handlers.message = handler;
+          if (handler) {
+            wsTransport.on('registered', (peerId, peers) => {
+              if (this._handlers.message) {
+                this._handlers.message({
+                  data: JSON.stringify({
+                    type: 'registered',
+                    peerId: peerId,
+                    peers: peers
+                  })
+                });
+              }
+            });
+            
+            wsTransport.on('new_peer', (peerId) => {
+              if (this._handlers.message) {
+                this._handlers.message({
+                  data: JSON.stringify({
+                    type: 'new_peer',
+                    peerId: peerId
+                  })
+                });
+              }
+            });
+            
+            wsTransport.on('signal', (peerId, signal) => {
+              // Validate the incoming signal before forwarding it
+              if (!peerId || typeof peerId !== 'string' || peerId.length !== 40) {
+                console.error('Invalid peer ID in incoming signal:', peerId);
+                return;
+              }
+
+              // Validate signal structure
+              if (!signal || typeof signal !== 'object' || !signal.type) {
+                console.error('Invalid signal structure from server:', signal);
+                return;
+              }
+              
+              // Validate signal type
+              const validSignalTypes = ['offer', 'answer', 'candidate', 'renegotiate', 'PING'];
+              if (!validSignalTypes.includes(signal.type)) {
+                console.warn(`Unknown signal type: ${signal.type} - allowing it anyway for compatibility`);
+              }
+              
+              // Skip further processing for PING signals
+              if (signal.type === 'PING') {
+                return;
+              }
+              
+              // Validate and fix signal contents based on type
+              if ((signal.type === 'offer' || signal.type === 'answer') && !signal.sdp) {
+                console.error(`Invalid ${signal.type} signal: missing SDP`, signal);
+                return;
+              }
+              
+              if (signal.type === 'candidate' && !signal.candidate) {
+                console.error('Invalid ICE candidate: missing candidate data', signal);
+                return;
+              }
+              
+              // Fix potentially corrupted ICE candidate strings
+              if (signal.type === 'candidate' && signal.candidate) {
+                if (typeof signal.candidate === 'string' &&
+                    !signal.candidate.includes('candidate:') &&
+                    !signal.candidate.includes('a=candidate:')) {
+                  console.warn('Attempting to repair malformed ICE candidate:', signal.candidate);
+                  // Try to add the missing prefix
+                  signal.candidate = 'candidate:' + signal.candidate;
+                }
+              }
+
+              // Signal validation passed, forward to message handler
+              if (this._handlers.message) {
+                this._handlers.message({
+                  data: JSON.stringify({
+                    type: 'signal',
+                    peerId: peerId,
+                    signal: signal
+                  })
+                });
+              }
+            });
+            
+            wsTransport.on('server_error', (message) => {
+              if (this._handlers.message) {
+                this._handlers.message({
+                  data: JSON.stringify({
+                    type: 'error',
+                    message: message
+                  })
+                });
+              }
+            });
+            
+            wsTransport.on('unknown_message', (message) => {
+              if (this._handlers.message && this._handlers.message) {
+                this._handlers.message({
+                  data: JSON.stringify(message)
+                });
+              }
+            });
+          }
+        },
+        
+        // Constants
+        OPEN: 1,
+        CLOSED: 3,
+        
+        // Dynamic readyState getter
+        get readyState() {
+          return wsTransport.connected ? 1 : 3; // 1=OPEN, 3=CLOSED
+        }
+      };
+      
+      // Set up initial connection handler
+      wsTransport.on('connect', () => {
+        if (wsWrapper._handlers.open) wsWrapper._handlers.open();
       });
+      
+      return wsWrapper;
     } catch (err) {
-      console.error(`WebSocket creation error: ${err.message}`);
+      console.error(`WebSocketTransport creation error: ${err.message}`);
+      const WebSocketClass = transportManager.getWebSocket();
       return {
-        OPEN: WebSocket.OPEN,
-        CLOSED: WebSocket.CLOSED,
+        OPEN: WebSocketClass.OPEN,
+        CLOSED: WebSocketClass.CLOSED,
       };
     }
   },
@@ -171,7 +345,9 @@ async function init() {
   dht.on("ready", (nodeId) => {
     console.log(`🟢 DHT ready. Your peer ID: ${nodeId}`);
     initializeApi(dht, nodeAdapter);
-    connectSignaling("ws://localhost:3001", { reconnectAttempts: 0 });
+    connectSignaling("ws://localhost:3001", {
+      reconnectAttempts: 0
+    });
     printCommands();
     promptCLI();
   });

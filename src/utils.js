@@ -7,14 +7,8 @@ import { sha1 as sha1Hash, generateRandomId } from "./sha1.js";
  * Environment detection
  */
 const ENV = {
-  BROWSER: typeof window !== "undefined",
-  NODE: (function() {
-    try {
-      return typeof process !== "undefined" && !!process.versions && !!process.versions.node;
-    } catch (e) {
-      return false;
-    }
-  })(),
+  BROWSER: typeof window !== 'undefined' && typeof window.document !== 'undefined',
+  NODE: typeof process !== 'undefined' && process.versions && !!process.versions.node
 };
 
 /**
