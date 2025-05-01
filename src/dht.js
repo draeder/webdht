@@ -273,7 +273,6 @@ class DHT extends EventEmitter {
   }
   constructor(options = {}) {
     super();
-    options = { ...options.dhtOptions }
     // Initialize Kademlia parameters with defaults or user-provided values
     console.log("🥰", "DHT options", options)
     this.K = options.k || DEFAULT_K;

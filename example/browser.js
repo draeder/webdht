@@ -284,7 +284,7 @@ const dhtOptions = {
       iceTransportPolicy: "all",
     },
     // Enable trickle for faster connection establishment
-    trickle: true,
+    trickle: false,
     // Improved SDP transformation to be more robust to WebRTC spec changes
     sdpTransform: (sdp) => {
       // Ensure we have ice-options:trickle for better connectivity
@@ -318,9 +318,7 @@ async function initApp() {
   try {
     console.log("Creating WebDHT instance...");
     // Create a WebDHT instance with signal batching and compression enabled
-    const dht = new WebDHT({
-      dhtOptions,
-    });
+    const dht = new WebDHT(dhtOptions);
 
     // Initialize the consolidated API with the DHT instance and UI adapter
     // This needs the dht instance, but doesn't need it to be 'ready'
