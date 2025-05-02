@@ -4,7 +4,7 @@
  * Handles client connection to PubNub real-time messaging platform for signaling
  */
 import EventEmitter from "../src/event-emitter.js";
-import { ENV } from "../src/utils.js";
+import { ENV, distance } from "../src/utils.js";
 import Logger from "../src/logger.js";
 
 class PubNubTransport extends EventEmitter {
@@ -38,6 +38,9 @@ class PubNubTransport extends EventEmitter {
     this.reconnectDelay = options.reconnectDelay || 5000;
     this.maxReconnectAttempts = options.maxReconnectAttempts || 10;
     this.debug = options.debug || false;
+    
+    // Standard Kademlia DHT parameter - number of closest peers to return
+    this.K = 20;
     
     // State tracking
     this.connected = false;
@@ -197,8 +200,36 @@ class PubNubTransport extends EventEmitter {
         switch (action) {
           case 'join':
             if (uuid !== this.pubnub.getUUID()) {
-              this.registeredPeers.add(uuid);
-              this.emit("new_peer", uuid);
+              // Calculate XOR distance to the new peer
+              const newPeerDistance = distance(this.peerId, uuid);
+              
+              // Calculate distances to existing peers and include the new peer
+              const allPeers = [...this.registeredPeers, uuid];
+              const peerDistances = allPeers.map(id => ({
+                id: id,
+                distance: distance(this.peerId, id)
+              }));
+              
+              // Sort by XOR distance
+              peerDistances.sort((a, b) => {
+                if (a.distance < b.distance) return -1;
+                if (a.distance > b.distance) return 1;
+                return 0;
+              });
+              
+              // Keep only the K closest peers
+              const closestPeers = peerDistances.slice(0, this.K).map(peer => peer.id);
+              
+              // Update the registered peers set
+              this.registeredPeers.clear();
+              closestPeers.forEach(id => this.registeredPeers.add(id));
+              
+              // Only emit new_peer event if the new peer is among the K closest
+              if (closestPeers.includes(uuid)) {
+                this.emit("new_peer", uuid);
+              } else {
+                this._logDebug(`New peer ${uuid} is not among the ${this.K} closest peers; ignoring`);
+              }
             }
             break;
           case 'leave':
@@ -236,15 +267,41 @@ class PubNubTransport extends EventEmitter {
               
               this._logDebug(`Current peers: ${peers.length}`);
               
+              // Get current peer ID - use UUID if peerId is not set
+              const currentPeerId = this.peerId || this.pubnub.getUUID();
+              let sortedPeers = peers;
+              
+              try {
+                // Filter and sort peers by XOR distance (closest first)
+                sortedPeers = peers
+                  .map(id => ({
+                    id: id,
+                    distance: distance(currentPeerId, id)
+                  }))
+                  .sort((a, b) => {
+                    if (a.distance < b.distance) return -1;
+                    if (a.distance > b.distance) return 1;
+                    return 0;
+                  })
+                  // Take only the K closest peers (K=20 as per Kademlia standard)
+                  .slice(0, this.K)
+                  // Map back to just the peer IDs
+                  .map(peer => peer.id);
+                
+                this._logDebug(`Closest ${sortedPeers.length} peers selected by XOR distance`);
+              } catch (err) {
+                this._logDebug(`Error calculating peer distances: ${err.message}`);
+              }
+              
               // Update registered peers
               this.registeredPeers.clear();
-              peers.forEach(peer => this.registeredPeers.add(peer));
+              sortedPeers.forEach(peer => this.registeredPeers.add(peer));
               
               // Inform peer registration complete
               if (this.peerId) {
-                this.emit("registered", this.peerId, peers);
+                this.emit("registered", this.peerId, sortedPeers);
               } else {
-                this.emit("registered", this.pubnub.getUUID(), peers);
+                this.emit("registered", this.pubnub.getUUID(), sortedPeers);
               }
             }).catch(err => {
               this._logDebug('Error fetching current peers:', err);
@@ -339,8 +396,37 @@ class PubNubTransport extends EventEmitter {
       case "register":
         // A peer is announcing its presence
         this._logDebug(`Peer registered: ${publisher}`);
-        this.registeredPeers.add(publisher);
-        this.emit("new_peer", publisher);
+        
+        // Calculate XOR distance to the new peer
+        const newPeerDistance = distance(this.peerId, publisher);
+        
+        // Calculate distances to existing peers and include the new peer
+        const allPeers = [...this.registeredPeers, publisher];
+        const peerDistances = allPeers.map(id => ({
+          id: id,
+          distance: distance(this.peerId, id)
+        }));
+        
+        // Sort by XOR distance
+        peerDistances.sort((a, b) => {
+          if (a.distance < b.distance) return -1;
+          if (a.distance > b.distance) return 1;
+          return 0;
+        });
+        
+        // Keep only the K closest peers
+        const closestPeers = peerDistances.slice(0, this.K).map(peer => peer.id);
+        
+        // Update the registered peers set
+        this.registeredPeers.clear();
+        closestPeers.forEach(id => this.registeredPeers.add(id));
+        
+        // Only emit new_peer event if the new peer is among the K closest
+        if (closestPeers.includes(publisher)) {
+          this.emit("new_peer", publisher);
+        } else {
+          this._logDebug(`New peer ${publisher} is not among the ${this.K} closest peers; ignoring`);
+        }
         break;
         
       case "error":

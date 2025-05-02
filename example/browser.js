@@ -92,9 +92,64 @@ const browserUiAdapter = {
       // Any other message resets the discovery in progress flag
       browserUiAdapter.discoveryInProgress = false;
     }
+    
+    // Special handling for connection status messages - normalize them for comparison
+    // by removing the colon if present and standardizing format
+    const isConnectionStatusMessage = message.includes("Connecting to") ||
+                                      message.includes("Connected to");
+    
+    // Detect disconnection messages to avoid duplication
+    const isDisconnectMessage = message.includes("Peer disconnected:");
+                                      
+    // Detect peer availability messages coming from different sources but meaning the same thing
+    const isPeerAvailabilityMessage = message.includes("peers available") ||
+                                     message.match(/Available peers: \d+/);
+    
+    let normalizedMessage = message;
+    if (isConnectionStatusMessage) {
+      normalizedMessage = message
+        .replace("Connecting to:", "Connecting to")
+        .replace("Connected to:", "Connected to")
+        .replace("Connected to peer:", "Connected to");
+    } else if (isDisconnectMessage) {
+      // Extract peer ID from disconnection message and normalize
+      const peerIdMatch = message.match(/Peer disconnected: ([a-f0-9]+)\.{3}/i);
+      if (peerIdMatch && peerIdMatch[1]) {
+        normalizedMessage = `DISCONNECT:${peerIdMatch[1]}`;
+      }
+    } else if (isPeerAvailabilityMessage) {
+      // Extract just the peer count from both message formats
+      // "Connected! X peers available" and "Available peers: X"
+      const peerCountMatch = message.match(/(\d+) peers available/) ||
+                            message.match(/Available peers: (\d+)/);
+      if (peerCountMatch && peerCountMatch[1]) {
+        normalizedMessage = `PEERS:${peerCountMatch[1]}`;
+      }
+    }
+    
+    let normalizedLastMessage = browserUiAdapter.lastStatusMessage;
+    if (isConnectionStatusMessage && browserUiAdapter.lastStatusMessage) {
+      normalizedLastMessage = browserUiAdapter.lastStatusMessage
+        .replace("Connecting to:", "Connecting to")
+        .replace("Connected to:", "Connected to")
+        .replace("Connected to peer:", "Connected to");
+    } else if (isDisconnectMessage && browserUiAdapter.lastStatusMessage) {
+      // Extract peer ID from last disconnection message if it was one
+      const peerIdMatch = browserUiAdapter.lastStatusMessage.match(/Peer disconnected: ([a-f0-9]+)\.{3}/i);
+      if (peerIdMatch && peerIdMatch[1]) {
+        normalizedLastMessage = `DISCONNECT:${peerIdMatch[1]}`;
+      }
+    } else if (isPeerAvailabilityMessage && browserUiAdapter.lastStatusMessage) {
+      // Normalize the last message in the same way if it was a peer availability message
+      const peerCountMatch = browserUiAdapter.lastStatusMessage.match(/(\d+) peers available/) ||
+                            browserUiAdapter.lastStatusMessage.match(/Available peers: (\d+)/);
+      if (peerCountMatch && peerCountMatch[1]) {
+        normalizedLastMessage = `PEERS:${peerCountMatch[1]}`;
+      }
+    }
 
-    // Skip if this is the same as the last non-error status message
-    if (message === browserUiAdapter.lastStatusMessage && !isError) {
+    // Skip if this is semantically the same as the last non-error status message
+    if ((normalizedMessage === normalizedLastMessage) && !isError) {
       return;
     }
 

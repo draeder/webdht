@@ -4,7 +4,7 @@
  * Handles client connection to the signaling server using WebSockets
  */
 import EventEmitter from "../src/event-emitter.js";
-import { ENV } from "../src/utils.js";
+import { ENV, distance } from "../src/utils.js";
 import Logger from "../src/logger.js";
 // Import WebSocket library conditionally based on environment
 let WebSocket;
@@ -40,6 +40,9 @@ class WebSocketTransport extends EventEmitter {
     this.reconnectDelay = options.reconnectDelay || 5000;
     this.maxReconnectAttempts = options.maxReconnectAttempts || 10;
     this.debug = options.debug || false;
+    
+    // Standard Kademlia DHT parameter - number of closest peers to return
+    this.K = 20;
     
     // State tracking
     this.connected = false;
@@ -185,18 +188,86 @@ class WebSocketTransport extends EventEmitter {
         this._logDebug(`Registered with server, peer ID: ${message.peerId}`);
         this._logDebug(`Available peers: ${message.peers.length}`);
         
+        // Store peerId that was assigned by the server
+        this.peerId = message.peerId;
+        
+        // Check if we can calculate XOR distance (we need our own peerId)
+        let peerList = message.peers;
+        
+        if (this.peerId) {
+          // Filter and sort peers by XOR distance (closest first)
+          peerList = message.peers
+            .map(id => ({
+              id: id,
+              distance: distance(this.peerId, id)
+            }))
+            .sort((a, b) => {
+              if (a.distance < b.distance) return -1;
+              if (a.distance > b.distance) return 1;
+              return 0;
+            })
+            // Take only the K closest peers (K=20 as per Kademlia standard)
+            .slice(0, this.K)
+            // Map back to just the peer IDs
+            .map(peer => peer.id);
+        }
+        
         // Store available peers
-        message.peers.forEach(peerId => this.registeredPeers.add(peerId));
+        peerList.forEach(peerId => this.registeredPeers.add(peerId));
         
         // Emit the registered event with peer list
-        this.emit("registered", message.peerId, message.peers);
+        this.emit("registered", message.peerId, peerList);
         break;
         
       case "new_peer":
         // A new peer joined the network
         this._logDebug(`New peer joined: ${message.peerId}`);
-        this.registeredPeers.add(message.peerId);
-        this.emit("new_peer", message.peerId);
+        
+        // Check if we can calculate XOR distance (we need our own peerId)
+        if (!this.peerId) {
+          // If we don't have our own ID yet, just add the peer and emit the event
+          this.registeredPeers.add(message.peerId);
+          this.emit("new_peer", message.peerId);
+          return;
+        }
+        
+        try {
+          // Calculate XOR distance to the new peer
+          const newPeerDistance = distance(this.peerId, message.peerId);
+          
+          // Calculate distances to existing peers and include the new peer
+          const allPeers = [...this.registeredPeers, message.peerId];
+          const peerDistances = allPeers.map(id => ({
+            id: id,
+            distance: distance(this.peerId, id)
+          }));
+          
+          // Sort by XOR distance
+          peerDistances.sort((a, b) => {
+            if (a.distance < b.distance) return -1;
+            if (a.distance > b.distance) return 1;
+            return 0;
+          });
+          
+          // Keep only the K closest peers
+          const closestPeers = peerDistances.slice(0, this.K).map(peer => peer.id);
+          
+          // Update the registered peers set
+          this.registeredPeers.clear();
+          closestPeers.forEach(id => this.registeredPeers.add(id));
+          
+          // Only emit new_peer event if the new peer is among the K closest
+          if (closestPeers.includes(message.peerId)) {
+            this.emit("new_peer", message.peerId);
+          } else {
+            this._logDebug(`New peer ${message.peerId} is not among the ${this.K} closest peers; ignoring`);
+          }
+        } catch (err) {
+          // If any error occurs during distance calculation, fall back to simple behavior
+          this._logDebug(`Error calculating peer distances: ${err.message}`);
+          this.registeredPeers.add(message.peerId);
+          this.emit("new_peer", message.peerId);
+        }
         break;
         
       case "signal":

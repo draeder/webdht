@@ -258,10 +258,18 @@ export function initializeApi(dht, adapter, debug = false) {
     _logDebug?.(`API: Connected to peer: ${peerId.substring(0, 8)}...`);
     connectedPeers.add(peerId);
     pendingConnections.delete(peerId);
-    uiAdapter.updateStatus(`Connected to peer: ${peerId.substring(0, 8)}...`);
-    // <<< ADDED: Update connected peers list >>>
+    uiAdapter.updateStatus(`Connected to: ${peerId.substring(0, 8)}...`);
+    
+    // Sync the connectedPeers set with dhtInstance.peers for consistency
+    // This ensures our local tracking matches the DHT's source of truth
+    connectedPeers.clear();
+    dhtInstance.peers.forEach((peer, id) => {
+      if (peer.connected) {
+        connectedPeers.add(id);
+      }
+    });
+    
     _logDebug?.(`Updating connected peers list with ${connectedPeers.size} peers`);
-    _logDebug?.(`Peer disconnected - updating connected peers list to ${connectedPeers.size}`);
     if (uiAdapter.updateConnectedPeers) {
       uiAdapter.updateConnectedPeers(Array.from(connectedPeers));
     }
@@ -296,9 +304,16 @@ export function initializeApi(dht, adapter, debug = false) {
       connectedPeers.delete(peerId);
       pendingConnections.delete(peerId); // Remove if it was pending and closed
       uiAdapter.updateStatus(`Peer disconnected: ${peerId.substring(0, 8)}...`);
-      // Update peer list via adapter if necessary
-      // uiAdapter.updatePeerList([...connectedPeers]);
-      // <<< ADDED: Update connected peers list >>>
+      
+      // Sync the connectedPeers set with dhtInstance.peers for consistency
+      connectedPeers.clear();
+      dhtInstance.peers.forEach((peer, id) => {
+        if (peer.connected) {
+          connectedPeers.add(id);
+        }
+      });
+      
+      _logDebug?.(`Peer closed - updating connected peers list to ${connectedPeers.size}`);
       if (uiAdapter.updateConnectedPeers) {
         uiAdapter.updateConnectedPeers(Array.from(connectedPeers));
       }
@@ -309,8 +324,15 @@ export function initializeApi(dht, adapter, debug = false) {
        connectedPeers.delete(peerId);
        pendingConnections.delete(peerId);
        uiAdapter.updateStatus(`Peer error (${peerId.substring(0, 8)}...): ${err.message}`, true);
-       // uiAdapter.updatePeerList([...connectedPeers]);
-       // <<< ADDED: Update connected peers list >>>
+       
+       // Sync the connectedPeers set with dhtInstance.peers for consistency
+       connectedPeers.clear();
+       dhtInstance.peers.forEach((peer, id) => {
+         if (peer.connected) {
+           connectedPeers.add(id);
+         }
+       });
+       
        _logDebug?.(`Peer error - updating connected peers list to ${connectedPeers.size}`);
        if (uiAdapter.updateConnectedPeers) {
          uiAdapter.updateConnectedPeers(Array.from(connectedPeers));
@@ -324,9 +346,15 @@ export function initializeApi(dht, adapter, debug = false) {
     connectedPeers.delete(peerId);
     pendingConnections.delete(peerId);
     uiAdapter.updateStatus(`Peer disconnected: ${peerId.substring(0, 8)}...`);
-    // uiAdapter.updatePeerList([...connectedPeers]);
-    // <<< ADDED: Update connected peers list >>>
-    _logDebug?.(`Updating connected peers list with ${connectedPeers.size} peers`);
+    
+    // Sync the connectedPeers set with dhtInstance.peers for consistency
+    connectedPeers.clear();
+    dhtInstance.peers.forEach((peer, id) => {
+      if (peer.connected) {
+        connectedPeers.add(id);
+      }
+    });
+    
     _logDebug?.(`Peer disconnected - updating connected peers list to ${connectedPeers.size}`);
     if (uiAdapter.updateConnectedPeers) {
       uiAdapter.updateConnectedPeers(Array.from(connectedPeers));
@@ -623,13 +651,9 @@ function setupPeerEvents(peer, peerId) {
   // No duplicate event handlers needed here as they're already defined in initializeApi
 
   // Listen for general disconnection events (might be redundant with peer.on('close'))
-  dhtInstance.on("disconnect", (peerId) => {
-    _logDebug(`API: Disconnected from peer: ${peerId.substring(0, 8)}...`);
-    connectedPeers.delete(peerId);
-    pendingConnections.delete(peerId);
-    uiAdapter.updateStatus(`Peer disconnected: ${peerId.substring(0, 8)}...`);
-    uiAdapter.updatePeerList([...connectedPeers]);
-  });
+  // Removed duplicate disconnect event listener that was causing multiple status updates
+  // This event is already handled by the peer.on('close') handler above
+  // and globally in the initializeApi function
 }
 
 /**
@@ -796,7 +820,7 @@ export async function connectToPeer(peerId) {
   }
 
   _logDebug(`API: Attempting manual connection to peer: ${peerId.substring(0, 8)}...`);
-  uiAdapter.updateStatus(`Connecting to ${peerId.substring(0, 8)}...`);
+  uiAdapter.updateStatus(`Connecting to: ${peerId.substring(0, 8)}...`);
   pendingConnections.set(peerId, Date.now());
 
   try {

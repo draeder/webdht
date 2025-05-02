@@ -35,11 +35,28 @@ exit               - Quit the app
 
 // Create a Node.js–compatible UI adapter for the API
 const nodeAdapter = {
-  updateStatus: (message, isError = false) =>
-    console.log(isError ? `❌ ERROR: ${message}` : `🔔 Status: ${message}`),
+  lastStatus: null,
+  lastStatusTime: 0,
+  updateStatus: function(message, isError = false) {
+    // Implement deduplication - only show status if it's changed or 5 seconds have passed
+    const now = Date.now();
+    if (message !== this.lastStatus || now - this.lastStatusTime > 5000) {
+      console.log(isError ? `❌ ERROR: ${message}` : `🔔 Status: ${message}`);
+      this.lastStatus = message;
+      this.lastStatusTime = now;
+    }
+  },
 
-  updatePeerList: (peerIds) =>
-    console.log("🌐 Available peers:", peerIds),
+  // Track last peer list to avoid duplicate messages
+  lastPeerList: null,
+  updatePeerList: function(peerIds) {
+    // Convert to string for comparison (handles array order differences)
+    const peerListString = JSON.stringify(peerIds.sort());
+    if (peerListString !== this.lastPeerList) {
+      console.log("🌐 Available peers:", peerIds);
+      this.lastPeerList = peerListString;
+    }
+  },
 
   addMessage: (peerId, message, isOutgoing) =>
     console.log(
@@ -251,12 +268,30 @@ const nodeAdapter = {
     }
   },
 
-  updateConnectedPeers: (peers) => {
-    console.log(
-      `🔌 Connected peers (${peers.length}): ${peers
-        .map((p) => p.substring(0, 8) + "...")
-        .join(", ")}`
-    );
+  // Track last connected peers list to avoid duplicate messages
+  lastConnectedPeerList: null,
+  updateConnectedPeers: function(peers) {
+    // Always check against the DHT's actual connected peers (source of truth)
+    // Only print if we have the DHT instance available
+    let connectedPeers = peers;
+    
+    if (dht) {
+      connectedPeers = [...dht.peers.keys()].filter(peerId => {
+        const peer = dht.peers.get(peerId);
+        return peer && peer.connected;
+      });
+    }
+    
+    // Convert to string for comparison (handles array order differences)
+    const peerListString = JSON.stringify(connectedPeers.sort());
+    if (peerListString !== this.lastConnectedPeerList) {
+      console.log(
+        `🔌 Connected peers (${connectedPeers.length}): ${connectedPeers
+          .map((p) => p.substring(0, 8) + "...")
+          .join(", ")}`
+      );
+      this.lastConnectedPeerList = peerListString;
+    }
   },
 };
 
@@ -268,7 +303,6 @@ global.document = {
     } else if (event.type === "api:new_peer" && autoconnectEnabled) {
       handleNewPeerEvent(event.detail);
     }
-    console.log(`🔔 Event dispatched: ${event.type}`);
   },
   addEventListener: () => {},
 };
@@ -359,7 +393,16 @@ async function init() {
 
 // Auto-connect on registration
 const connectionAttempts = new Set();
+const processedRegistrations = new Set(); // Track processed registration events
+
 async function handleRegisteredEvent(detail) {
+  // Generate a unique ID for this registration event to prevent duplicates
+  const eventId = JSON.stringify(detail.peers);
+  if (processedRegistrations.has(eventId)) {
+    return; // Skip if we've already processed this exact registration
+  }
+  processedRegistrations.add(eventId);
+  
   const peers = detail.peers;
   console.log(`🔍 Found ${peers.length} existing peers, connecting...`);
 
@@ -401,8 +444,21 @@ async function handleRegisteredEvent(detail) {
 }
 
 // Auto-connect on new-peer events
+const processedNewPeers = new Set(); // Track processed new peer events
+
 async function handleNewPeerEvent(detail) {
   const peerId = detail.peerId;
+  
+  // Skip if we've already processed this peer event recently
+  if (processedNewPeers.has(peerId)) {
+    return;
+  }
+  processedNewPeers.add(peerId);
+  
+  // Clear old entries from the processed set after a delay to allow re-processing after some time
+  setTimeout(() => {
+    processedNewPeers.delete(peerId);
+  }, 30000); // Clear after 30 seconds
   if (connectionAttempts.has(peerId) || dht.peers.has(peerId)) {
     console.log(
       `⏭️ Skipping auto-connect to ${peerId} - already in progress`

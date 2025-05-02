@@ -37,22 +37,28 @@ wss.on('connection', (ws) => {
         peers.set(peerId, ws);
         console.log(`Registered: ${peerId}`);
 
-        const peerList = Array.from(peers.keys()).filter(id => id !== peerId);
+        // Get list of other peers (XOR distance calculation moved to transport files)
+        const peerList = Array.from(peers.keys())
+          .filter(id => id !== peerId);
+        
         ws.send(JSON.stringify({
           type: 'registered',
           peerId: peerId,
           peers: peerList
         }));
 
-        // Notify existing peers
-        peers.forEach((existingWs, existingId) => {
-          if (existingId !== peerId && existingWs.readyState === 1) {
-            existingWs.send(JSON.stringify({
-              type: 'new_peer',
-              peerId: peerId
-            }));
-          }
-        });
+        // Notify all peers about the new peer (filtering by XOR distance moved to transport files)
+        Array.from(peers.entries())
+          .filter(([existingId, _]) => existingId !== peerId)
+          .forEach(([id, ws]) => {
+            if (ws.readyState === 1) {
+              ws.send(JSON.stringify({
+                type: 'new_peer',
+                peerId: peerId
+              }));
+              console.log(`Notified peer ${id.substring(0, 8)} about new peer ${peerId.substring(0, 8)}`);
+            }
+          });
       }
       else if (data.type === 'signal' && data.target && data.signal) {
         const targetWs = peers.get(data.target);
