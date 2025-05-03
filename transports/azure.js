@@ -540,8 +540,20 @@ class AzureTransport extends EventEmitter {
       return false;
     }
     
+    if (!signal || typeof signal !== 'object') {
+      this._logDebug("Invalid signal format");
+      this.emit("error", new Error("Signal must be an object"));
+      return false;
+    }
+    
+    const validTypes = ['offer', 'answer', 'candidate', 'renegotiate'];
+    if (!validTypes.includes(signal.type)) {
+      this._logDebug(`Invalid signal type: ${signal.type}`);
+      this.emit("error", new Error(`Invalid signal type: ${signal.type}`));
+      return false;
+    }
+
     if (this.useSignalR) {
-      // For SignalR, invoke the signal method
       return this.client.invoke("Signal", targetPeerId, signal)
         .then(() => true)
         .catch(err => {
@@ -550,7 +562,6 @@ class AzureTransport extends EventEmitter {
           return false;
         });
     } else {
-      // For Web PubSub, send a signal message
       return this.send({
         type: "signal",
         target: targetPeerId,

@@ -18,45 +18,46 @@ class Peer extends EventEmitter {
   constructor(options = {}) {
     super();
 
-    this.nodeId = options.nodeId;
-    this.peerId = options.peerId;
-    this.peerIdHex = this.peerId ? bufferToHex(this.peerId) : null;
-    this.connected = false;
-    this.destroyed = false;
-    this.initialized = false;
-    this.debug = options.debug || false;
-    
+    this.nodeId           = options.nodeId;
+    this.peerId           = options.peerId;
+    this.peerIdHex        = this.peerId ? bufferToHex(this.peerId) : null;
+    this.connected        = false;
+    this.destroyed        = false;
+    this.initialized      = false;
+    this.debug            = options.debug || false;
+    this._routedPeers     = new Set();
+    this.receivedCandidates = new Set();
+
     // Initialize logger
     this.logger = new Logger("Peer");
-    
-    // Store retry and reconnection options
-    this.reconnectTimer = options.reconnectTimer || 0; // Default: no auto-reconnect
-    this.iceCompleteTimeout = options.iceCompleteTimeout || 0; // Default: no timeout
-    this.retries = options.retries || 0; // Default: no retries
-    this.currentRetry = 0;
-    this.reconnectTimeout = null;
-    this.iceTimeoutTimer = null;
 
-    // Extract simple-peer specific options
+    // Retry / reconnection options
+    this.reconnectTimer      = options.reconnectTimer || 0;
+    this.iceCompleteTimeout  = options.iceCompleteTimeout || 0;
+    this.retries             = options.retries || 0;
+    this.currentRetry        = 0;
+    this.reconnectTimeout    = null;
+    this.iceTimeoutTimer     = null;
+
+    // Build simple-peer options
     const simplePeerOptions = {
       initiator: options.initiator || false,
-      trickle: options.trickle !== false,
+      trickle:   options.trickle !== false,
       config: {
         iceServers: options.iceServers || [
           { urls: "stun:stun.l.google.com:19302" },
           { urls: "stun:stun1.l.google.com:19302" },
           { urls: "stun:stun2.l.google.com:19302" },
-          { urls: "stun:global.stun.twilio.com:3478" },
-        ],
+          { urls: "stun:global.stun.twilio.com:3478" }
+        ]
       },
-      wrtc: options.wrtc,
-      sdpTransform: options.sdpTransform,
+      wrtc:         options.wrtc,
+      sdpTransform: options.sdpTransform
     };
 
-    // Merge any additional simple-peer options
     this.options = {
       ...simplePeerOptions,
-      ...options.simplePeerOptions,
+      ...options.simplePeerOptions
     };
 
     this.signalQueue = [];
@@ -64,25 +65,19 @@ class Peer extends EventEmitter {
       this.signalQueue.push(options.signal);
     }
 
-    // Initialize asynchronously
+    // Kick off async init
     this._initialize();
   }
-  
-  /**
-   * Helper for conditional debug logging
-   * @private
-   */
+
+  /** @private */
   _logDebug(...args) {
     if (this.debug && this.logger?.debug) {
-      const prefix = `Peer:${this.peerIdHex?.substring(0, 8) || 'unknown'}`;
+      const prefix = `Peer:${this.peerIdHex?.substring(0, 8) || "unknown"}`;
       this.logger.debug(`[${prefix}]`, ...args);
     }
   }
 
-  /**
-   * Initialize the peer connection (async)
-   * @private
-   */
+  /** @private */
   async _initialize() {
     try {
       if (ENV.NODE && !this.options.wrtc) {
@@ -95,31 +90,31 @@ class Peer extends EventEmitter {
       }
 
       const createPeer = await getSimplePeer();
-      this.peer =
+      this.peer = (
         typeof createPeer === "function" &&
         createPeer.prototype &&
         createPeer.prototype._isSimplePeer
-          ? new createPeer(this.options)
-          : new createPeer(this.options);
+      )
+        ? new createPeer(this.options)
+        : new createPeer(this.options);
 
       this._setupListeners();
       this.initialized = true;
 
-      while (this.signalQueue.length > 0) {
-        const signal = this.signalQueue.shift();
-        this.signal(signal);
+      while (this.signalQueue.length > 0 && !this.connected) {
+        this.signal(this.signalQueue.shift());
       }
-      this._logDebug(`Peer initialized with ID ${this.peerIdHex.substring(0, 8)}...`);
+      if (this.connected) {
+        this.signalQueue = [];
+      }
+      this._logDebug(`Peer initialized (${this.peerIdHex?.substring(0, 8)})`);
     } catch (err) {
-      this._logDebug("Failed to initialize peer:", err.message);
+      this._logDebug("Initialization error:", err.message);
       this.emit("error", err, this.peerIdHex);
     }
   }
 
-  /**
-   * Setup event listeners for the peer
-   * @private
-   */
+  /** @private */
   _setupListeners() {
     this.peer.on("signal", (data) => {
       this.emit("signal", data, this.peerIdHex);
@@ -127,48 +122,37 @@ class Peer extends EventEmitter {
 
     this.peer.on("connect", () => {
       this.connected = true;
-      this.currentRetry = 0; // Reset retry counter on successful connection
-      
-      // Clear any pending reconnect timeouts
+      this.currentRetry = 0;
       if (this.reconnectTimeout) {
         clearTimeout(this.reconnectTimeout);
         this.reconnectTimeout = null;
       }
-      
-      // Clear any ICE timeout timers
       if (this.iceTimeoutTimer) {
         clearTimeout(this.iceTimeoutTimer);
         this.iceTimeoutTimer = null;
       }
-      
+      this.signalQueue = [];
       this.emit("connect", this.peerIdHex);
     });
 
     this.peer.on("data", (data) => {
       this.emit("data", data, this.peerIdHex);
       try {
-        const message = JSON.parse(data.toString());
-        this.emit("message", message, this.peerIdHex);
+        const msg = JSON.parse(data.toString());
+        this.emit("message", msg, this.peerIdHex);
       } catch {
-        // Non-JSON data; ignore
+        // ignore non-JSON
       }
     });
 
     this.peer.on("close", () => {
       this.connected = false;
       this.emit("close", this.peerIdHex);
-      
-      // Try to reconnect if reconnectTimer is set and we haven't exceeded retries
       if (this.reconnectTimer > 0 && this.currentRetry < this.retries) {
-        this._logDebug(`Connection to ${this.peerIdHex.substring(0, 8)}... closed. Attempting reconnect in ${this.reconnectTimer}ms (retry ${this.currentRetry + 1}/${this.retries})`);
-        
+        this._logDebug(`Closed — retry ${this.currentRetry+1}/${this.retries} in ${this.reconnectTimer}ms`);
         this.currentRetry++;
         this.reconnectTimeout = setTimeout(() => {
-          if (!this.destroyed) {
-            this._logDebug(`Attempting to reconnect to ${this.peerIdHex.substring(0, 8)}...`);
-            // Recreate the peer with the same options
-            this._initialize();
-          }
+          if (!this.destroyed) this._initialize();
         }, this.reconnectTimer);
       } else {
         this.destroy();
@@ -176,31 +160,22 @@ class Peer extends EventEmitter {
     });
 
     this.peer.on("error", (err) => {
-      this._logDebug(`Peer error with ${this.peerIdHex.substring(0, 8)}...`, err.message);
+      this._logDebug(`Error:`, err.message);
       this.emit("error", err, this.peerIdHex);
-      
-      // Handle ICE connection failures specifically
-      if (err.message && (
-          err.message.includes("Ice connection failed") ||
-          err.message.includes("ICE failed") ||
-          err.code === 'ERR_ICE_CONNECTION_FAILURE')) {
-        
-        this._logDebug(`ICE connection failed with ${this.peerIdHex.substring(0, 8)}... Will retry if configured.`);
-        
-        // Force close and trigger reconnect logic
-        if (this.peer) {
-          this.peer.destroy();
-        }
+      if (
+        err.message?.includes("Ice connection failed") ||
+        err.message?.includes("ICE failed") ||
+        err.code === "ERR_ICE_CONNECTION_FAILURE"
+      ) {
+        this._logDebug(`ICE failure — retrying if configured`);
+        this.peer.destroy();
       }
     });
-    
-    // Set up ICE timeout if configured
+
     if (this.iceCompleteTimeout > 0) {
       this.iceTimeoutTimer = setTimeout(() => {
         if (this.peer && !this.connected) {
-          this._logDebug(`ICE connection timed out after ${this.iceCompleteTimeout}ms for peer ${this.peerIdHex.substring(0, 8)}...`);
-          
-          // Force close and trigger reconnect logic
+          this._logDebug(`ICE timeout after ${this.iceCompleteTimeout}ms`);
           this.peer.destroy();
         }
       }, this.iceCompleteTimeout);
@@ -208,32 +183,64 @@ class Peer extends EventEmitter {
   }
 
   /**
-   * Signal the peer
-   * @param {Object} data - Signal data
+   * Process incoming signal
+   * @param {Object} data
    */
   signal(data) {
-    if (this.destroyed) return;
+    if (
+      !data ||
+      typeof data !== "object" ||
+      !data.type ||
+      !["offer", "answer", "candidate", "renegotiate", "PING", "SIGNAL", "ROUTE_TEST"].includes(data.type)
+    ) {
+      this._logDebug(`Invalid signal`, data);
+      throw new Error("Invalid signal data");
+    }
+    if ((data.type === "candidate" && !data.candidate) || (data.type === "PING" && !data.sender)) {
+      this._logDebug(`Missing ICE candidate`, data);
+      throw new Error("ICE candidate missing");
+    }
+    if ((["offer","answer"].includes(data.type) && !data.sdp) || (data.type === "SIGNAL" && !data.target)) {
+      this._logDebug(`Missing SDP`, data);
+      throw new Error("SDP missing");
+    }
 
+    if (data.type === 'candidate' && data.candidate) {
+      if (this.receivedCandidates.has(data.candidate)) {
+        this._logDebug(`Duplicate ICE candidate, skipping`);
+        return;
+      }
+      this.receivedCandidates.add(data.candidate);
+    }
+
+    if (this.connected) {
+      this._logDebug(`Ignoring signal — already connected`);
+      return;
+    }
     if (!this.initialized || !this.peer) {
+      this._logDebug(`Queueing signal`);
       this.signalQueue.push(data);
       return;
     }
 
-    this.peer.signal(data);
+    try {
+      this.peer.signal(data);
+    } catch (err) {
+      this._logDebug(`Signal processing failed`, err.message);
+      throw err;
+    }
   }
 
   /**
-   * Send data to the peer
-   * @param {Object|Buffer|string} data - Data to send
+   * Send data (object/Buffer/string)
    */
   send(data) {
-    if (!this.connected || this.destroyed || !this.initialized || !this.peer)
+    if (!this.connected || this.destroyed || !this.initialized || !this.peer) {
       return false;
-
+    }
     if (typeof data === "object" && !(data instanceof Uint8Array)) {
       data = JSON.stringify(data);
     }
-
     try {
       this.peer.send(data);
       return true;
@@ -243,17 +250,26 @@ class Peer extends EventEmitter {
     }
   }
 
-  /**
-   * Destroy the peer connection
-   */
+  /** Destroy this peer */
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
     this.connected = false;
+    this._routedPeers = new Set();
     if (this.initialized && this.peer) {
       this.peer.destroy();
     }
     this.emit("destroyed", this.peerIdHex);
+  }
+
+  /** @private */
+  _hasRoutedTo(peerId) {
+    return this._routedPeers.has(peerId);
+  }
+
+  /** @private */
+  _addRoutedPeer(peerId) {
+    this._routedPeers.add(peerId);
   }
 }
 

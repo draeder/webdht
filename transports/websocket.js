@@ -119,6 +119,7 @@ class WebSocketTransport extends EventEmitter {
       
       // Register this peer if we have an ID
       if (this.peerId) {
+        this._logDebug(`[WebSocket Transport] Auto-registering with peer ID: ${this.peerId}`);
         this.register(this.peerId);
       }
       
@@ -338,10 +339,11 @@ class WebSocketTransport extends EventEmitter {
     }
     
     // Validate signal type
-    const validSignalTypes = ['offer', 'answer', 'candidate', 'renegotiate', 'PING'];
+    const validSignalTypes = ['offer', 'answer', 'candidate', 'renegotiate', 'PING', 'ROUTE_TEST', 'SIGNAL'];
     if (!validSignalTypes.includes(signal.type)) {
       this._logDebug(`Warning: Unknown signal type ${signal.type}`);
-      // Still allow it for compatibility, but log warning
+      this.emit("error", new Error(`Invalid signal type: ${signal.type}`));
+      return false;
     }
     
     // Validate offer/answer signals

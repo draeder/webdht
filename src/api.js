@@ -1,29 +1,31 @@
 /**
  * Consolidated API for WebDHT operations, peer discovery, and signaling.
- * Handles both browser and Node.js environments.
+ * Handles both browser and Node.js environments with modular transport support.
  */
 
-import WebDHT from "./index.js"; // Assuming index.js is the main export
+import WebDHT from "./index.js";
 import Logger from './logger.js';
+import transportManager from "../transports/index.js";
 
 // Keep track of connected peers for demo/logging
 const connectedPeers = new Set();
 // Track ongoing connection attempts
 const pendingConnections = new Map();
 
-let signalingSocket = null;
+// Transport system variables
+let activeTransport = null;
 let dhtInstance = null;
+
+// UI adapter with default implementations
 let uiAdapter = {
   updateStatus: (message, isError = false) => _logDebug?.(isError ? `ERROR: ${message}` : `Status: ${message}`),
   updatePeerList: (peerIds) => _logDebug?.("Available peers:", peerIds),
   addMessage: (peerId, message, isOutgoing) => _logDebug?.(`Message ${isOutgoing ? 'to' : 'from'} ${peerId.substring(0,8)}: ${message}`),
-  getWebSocket: (url) => new WebSocket(url), // Browser default
   updateConnectedPeers: (peers) => {
     if (!peers || !peers.length) return;
     _logDebug(`Connected peers (${peers.length}): ${peers.map(p => p.substring(0, 8) + '...').join(', ')}`);
   }
 };
-
 
 // Global logger instance
 let logger = null;
@@ -60,11 +62,41 @@ export function initializeApi(dht, adapter, debug = false) {
     uiAdapter = { ...uiAdapter, ...adapter };
   }
 
-  // Listen for signal events from the DHT and forward them
+  // Listen for signal events from the DHT and forward them via the transport
   dhtInstance.on("signal", async (data) => {
-    // We should check if the socket is open without creating a new WebSocket with empty URL
-    const WS_OPEN = uiAdapter.getWebSocket ? 1 : WebSocket.OPEN; // 1 is the standard OPEN state
-    if (!signalingSocket || signalingSocket.readyState !== WS_OPEN) return;
+    if (!data || !data.id || !data.signal || typeof data.id !== 'string') {
+      _logDebug?.("Invalid signal format received:", data);
+      return;
+    }
+    
+    const validTypes = ['offer', 'answer', 'candidate', 'PING', 'SIGNAL', 'ROUTE_TEST'];
+    if (!validTypes.includes(data.signal?.type)) {
+      _logDebug?.("Invalid signal type from", data.id.substring(0,8) + "...", data.signal);
+      return;
+    }
+    
+    // Validation for WebRTC-specific signals
+    if (data.signal.type === 'candidate' && !data.signal.candidate) {
+      _logDebug?.("Missing candidate in ICE signal from", data.id.substring(0,8) + "...");
+      return;
+    }
+    
+    if (['offer', 'answer'].includes(data.signal.type) && !data.signal.sdp) {
+      _logDebug?.("Missing SDP in", data.signal.type, "from", data.id.substring(0,8) + "...");
+      return;
+    }
+    
+    // Validation for DHT-specific signals
+    if (data.signal.type === 'PING' && !data.signal.sender) {
+      _logDebug?.("Missing sender in PING signal from", data.id.substring(0,8) + "...");
+      return;
+    }
+
+    // Ensure we have an active transport
+    if (!activeTransport || !activeTransport.connected) {
+      _logDebug?.("API: Cannot forward signal - no connected transport");
+      return;
+    }
 
     // Data should contain both the peer ID and the signal data
     if (data && data.id && data.signal) {
@@ -75,17 +107,11 @@ export function initializeApi(dht, adapter, debug = false) {
       if (data.viaDht) {
         _logDebug?.(`API: Signal from ${targetPeerId.substr(0, 8)}... was received via DHT`);
         // Report this as a DHT signal to the server for statistics
-        const WS_OPEN = uiAdapter.getWebSocket ? 1 : WebSocket.OPEN; // 1 is the standard OPEN state
-        if (signalingSocket && signalingSocket.readyState === WS_OPEN) {
-          _logDebug?.("API: Reporting DHT signal to server:", dhtInstance.nodeId, "->", targetPeerId);
-          signalingSocket.send(
-            JSON.stringify({
-              type: "dht_signal_report",
-              source: dhtInstance.nodeId,
-              target: targetPeerId
-            })
-          );
-        }
+        activeTransport.send?.({
+          type: "dht_signal_report",
+          source: dhtInstance.nodeId,
+          target: targetPeerId
+        });
         return; // No need to forward it again
       }
 
@@ -106,24 +132,14 @@ export function initializeApi(dht, adapter, debug = false) {
       // For WebRTC signaling, always use the server to ensure reliable connection establishment
       if (isWebRTCSignal) {
         _logDebug?.(`API: Using server for WebRTC offer/answer signal to ${targetPeerId.substr(0, 8)}...`);
-        signalingSocket.send(
-          JSON.stringify({
-            type: "signal",
-            target: targetPeerId,
-            signal: data.signal,
-          })
-        );
+        activeTransport.signal(targetPeerId, data.signal);
+        
         // Report this as a server signal
-        const WS_OPEN = uiAdapter.getWebSocket ? 1 : WebSocket.OPEN; // 1 is the standard OPEN state
-        if (signalingSocket && signalingSocket.readyState === WS_OPEN) {
-          signalingSocket.send(
-            JSON.stringify({
-              type: "server_signal_report",
-              source: dhtInstance.nodeId,
-              target: targetPeerId
-            })
-          );
-        }
+        activeTransport.send?.({
+          type: "server_signal_report",
+          source: dhtInstance.nodeId,
+          target: targetPeerId
+        });
         return;
       }
       
@@ -137,24 +153,14 @@ export function initializeApi(dht, adapter, debug = false) {
           _logDebug?.(`API: Using server for ICE candidate signal to ${targetPeerId.substr(0, 8)}...`);
         }
         
-        signalingSocket.send(
-          JSON.stringify({
-            type: "signal",
-            target: targetPeerId,
-            signal: data.signal,
-          })
-        );
+        activeTransport.signal(targetPeerId, data.signal);
+        
         // Report this as a server signal
-        const WS_OPEN = uiAdapter.getWebSocket ? 1 : WebSocket.OPEN; // 1 is the standard OPEN state
-        if (signalingSocket && signalingSocket.readyState === WS_OPEN) {
-          signalingSocket.send(
-            JSON.stringify({
-              type: "server_signal_report",
-              source: dhtInstance.nodeId,
-              target: targetPeerId
-            })
-          );
-        }
+        activeTransport.send?.({
+          type: "server_signal_report",
+          source: dhtInstance.nodeId,
+          target: targetPeerId
+        });
         return;
       }
 
@@ -162,24 +168,14 @@ export function initializeApi(dht, adapter, debug = false) {
       const isNewPeer = dhtInstance.peers.size <= 2;
       if (isNewPeer) {
         _logDebug?.(`API: New peer with ${dhtInstance.peers.size} connections using server to signal ${targetPeerId.substr(0, 8)}...`);
-        signalingSocket.send(
-          JSON.stringify({
-            type: "signal",
-            target: targetPeerId,
-            signal: data.signal,
-          })
-        );
+        activeTransport.signal(targetPeerId, data.signal);
+        
         // Report as server signal
-        const WS_OPEN = uiAdapter.getWebSocket ? 1 : WebSocket.OPEN; // 1 is the standard OPEN state
-        if (signalingSocket && signalingSocket.readyState === WS_OPEN) {
-          signalingSocket.send(
-            JSON.stringify({
-              type: "server_signal_report",
-              source: dhtInstance.nodeId,
-              target: targetPeerId
-            })
-          );
-        }
+        activeTransport.send?.({
+          type: "server_signal_report",
+          source: dhtInstance.nodeId,
+          target: targetPeerId
+        });
         return;
       }
 
@@ -200,11 +196,13 @@ export function initializeApi(dht, adapter, debug = false) {
                signalPath: [dhtInstance.nodeId]
              });
              signalSent = true;
+             
              // Report DHT signal
-             const WS_OPEN = uiAdapter.getWebSocket ? 1 : WebSocket.OPEN; // 1 is the standard OPEN state
-             if (signalingSocket && signalingSocket.readyState === WS_OPEN) {
-                signalingSocket.send(JSON.stringify({ type: "dht_signal_report", source: dhtInstance.nodeId, target: targetPeerId }));
-             }
+             activeTransport.send?.({
+               type: "dht_signal_report",
+               source: dhtInstance.nodeId,
+               target: targetPeerId
+             });
           }
         } else {
            // Attempt routing via another peer (simplified - picks first connected)
@@ -223,11 +221,13 @@ export function initializeApi(dht, adapter, debug = false) {
                  signalPath: [dhtInstance.nodeId]
               });
               signalSent = true;
+              
               // Report DHT signal
-              const WS_OPEN = uiAdapter.getWebSocket ? 1 : WebSocket.OPEN; // 1 is the standard OPEN state
-              if (signalingSocket && signalingSocket.readyState === WS_OPEN) {
-                 signalingSocket.send(JSON.stringify({ type: "dht_signal_report", source: dhtInstance.nodeId, target: targetPeerId }));
-              }
+              activeTransport.send?.({
+                type: "dht_signal_report",
+                source: dhtInstance.nodeId,
+                target: targetPeerId
+              });
            }
         }
       } catch (err) {
@@ -237,18 +237,14 @@ export function initializeApi(dht, adapter, debug = false) {
       // Fallback to server
       if (!signalSent) {
         _logDebug?.(`API: Falling back to server for signal to ${targetPeerId.substr(0, 8)}...`);
-        signalingSocket.send(
-          JSON.stringify({
-            type: "signal",
-            target: targetPeerId,
-            signal: data.signal,
-          })
-        );
+        activeTransport.signal(targetPeerId, data.signal);
+        
         // Report server signal
-        const WS_OPEN = uiAdapter.getWebSocket ? 1 : WebSocket.OPEN; // 1 is the standard OPEN state
-        if (signalingSocket && signalingSocket.readyState === WS_OPEN) {
-          signalingSocket.send(JSON.stringify({ type: "server_signal_report", source: dhtInstance.nodeId, target: targetPeerId }));
-        }
+        activeTransport.send?.({
+          type: "server_signal_report",
+          source: dhtInstance.nodeId,
+          target: targetPeerId
+        });
       }
     }
   });
@@ -257,7 +253,14 @@ export function initializeApi(dht, adapter, debug = false) {
   dhtInstance.on("peer:connect", (peerId) => {
     _logDebug?.(`API: Connected to peer: ${peerId.substring(0, 8)}...`);
     connectedPeers.add(peerId);
+    
+    // Clear any pending connection timeout for this peer
+    const pendingConnection = pendingConnections.get(peerId);
+    if (pendingConnection && pendingConnection.timeoutId) {
+      clearTimeout(pendingConnection.timeoutId);
+    }
     pendingConnections.delete(peerId);
+    
     uiAdapter.updateStatus(`Connected to: ${peerId.substring(0, 8)}...`);
     
     // Sync the connectedPeers set with dhtInstance.peers for consistency
@@ -380,6 +383,69 @@ export function initializeApi(dht, adapter, debug = false) {
  * @param {string} url - The WebSocket URL of the signaling server.
  * @param {object} options - Optional parameters including reconnection attempts.
  */
+/**
+ * Create a transport instance by name or use a custom transport
+ * @param {string|object} transport - Transport name or custom transport instance
+ * @param {object} options - Options for the transport
+ * @returns {object} Transport instance
+ */
+export function createTransport(transport, options = {}) {
+  if (typeof transport === 'string') {
+    // Create transport by name using the transport manager
+    const transportName = transport.toLowerCase();
+    _logDebug?.(`Creating ${transportName} transport with options:`, options);
+    
+    try {
+      return transportManager.create(transportName, {
+        ...options,
+        debug: options.debug !== undefined ? options.debug : Boolean(logger?.debug)
+      });
+    } catch (err) {
+      _logDebug?.(`Error creating ${transportName} transport:`, err);
+      throw err;
+    }
+  } else if (transport && typeof transport === 'object') {
+    // Use provided transport instance directly
+    _logDebug?.("Using provided custom transport instance");
+    return transport;
+  }
+  
+  throw new Error("Invalid transport parameter. Must be a transport name string or transport instance");
+}
+
+/**
+ * Get a list of all available transports
+ * @returns {string[]} Array of transport names
+ */
+export function getAvailableTransports() {
+  return transportManager.getAvailableTransports();
+}
+
+/**
+ * Register a custom transport with the transport manager
+ * @param {string} name - Name of the transport
+ * @param {constructor} TransportClass - Transport class constructor
+ * @returns {boolean} Success indicator
+ */
+export function registerTransport(name, TransportClass) {
+  try {
+    transportManager.register(name, TransportClass);
+    _logDebug?.(`Registered transport: ${name}`);
+    return true;
+  } catch (err) {
+    _logDebug?.(`Error registering transport: ${err.message}`);
+    throw err;
+  }
+}
+
+/**
+ * Connects to the signaling server using a specified or default transport.
+ * @param {string} url - The WebSocket URL of the signaling server.
+ * @param {object} options - Connection options:
+ *   - transport: string or object - Transport name or custom transport instance
+ *   - reconnectAttempts: number - Number of reconnection attempts (default: 0)
+ *   - any other options specific to the selected transport
+ */
 export function connectSignaling(url, options = {}) {
   if (!dhtInstance) {
     _logDebug?.("API Error: DHT not initialized. Call initializeApi first.");
@@ -391,64 +457,183 @@ export function connectSignaling(url, options = {}) {
 
   _logDebug?.("API: Connecting to signaling server...", url);
 
-  // Close any existing connection
-  const WS_CLOSED = uiAdapter.getWebSocket ? 3 : WebSocket.CLOSED; // 3 is the standard CLOSED state
-  if (signalingSocket && signalingSocket.readyState !== WS_CLOSED) {
-    signalingSocket.close();
+  // Close any existing transport connection
+  if (activeTransport) {
+    _logDebug?.("API: Closing existing transport connection");
+    activeTransport.disconnect();
+    activeTransport = null;
   }
 
-  // Use the adapter to create the WebSocket connection
-  signalingSocket = uiAdapter.getWebSocket(url);
+  // Determine which transport to use
+  try {
+    const transportType = options.transport || 'websocket';
+    
+    // Set up transport options
+    const transportOptions = {
+      ...options,
+      url,
+      peerId: nodeId,
+      debug: options.debug !== undefined ? options.debug : Boolean(logger?.debug)
+    };
+    
+    // Create the transport
+    activeTransport = createTransport(transportType, transportOptions);
+    
+    // Set up event handlers for the transport
+    setupTransportEvents(activeTransport);
+    
+    // Connect if not already connected
+    if (!activeTransport.connected) {
+      activeTransport.connect(url);
+    }
+  } catch (err) {
+    _logDebug?.("API: Failed to create transport:", err);
+    uiAdapter.updateStatus(`Signaling connection error: ${err.message}`, true);
+    
+    // Dispatch error event
+    document.dispatchEvent(new CustomEvent('signaling:error', {
+      detail: { url, error: err, reconnectAttempts }
+    }));
+  }
+}
 
-  signalingSocket.onopen = () => {
+/**
+ * Set up event handlers for transport
+ * @param {object} transport - Transport instance
+ * @private
+ */
+function setupTransportEvents(transport) {
+  transport.on('connect', () => {
     _logDebug?.("API: Connected to signaling server");
     uiAdapter.updateStatus("Connected to signaling server");
 
     // Dispatch connection event
     document.dispatchEvent(new CustomEvent('signaling:connected', {
-      detail: { url, reconnectAttempts }
+      detail: { url: transport.url }
     }));
 
     // Register this peer
-    _logDebug?.(`API: Registering as peer: ${nodeId}`);
-    signalingSocket.send(
-      JSON.stringify({
-        type: "register",
-        peerId: nodeId,
-      })
-    );
-  };
+    if (dhtInstance && dhtInstance.nodeId) {
+      _logDebug?.(`API: Registering as peer: ${dhtInstance.nodeId}`);
+      console.log(`[API] Explicitly registering with peer ID: ${dhtInstance.nodeId}`);
+      transport.register(dhtInstance.nodeId);
+    }
+  });
 
-  signalingSocket.onerror = (error) => {
-    _logDebug?.("API: WebSocket error:", error);
+  transport.on('error', (err) => {
+    _logDebug?.("API: Transport error:", err);
     uiAdapter.updateStatus("Signaling connection error", true);
     
     // Dispatch error event
     document.dispatchEvent(new CustomEvent('signaling:error', {
-      detail: { url, error, reconnectAttempts }
+      detail: { error: err }
     }));
-  };
+  });
 
-  signalingSocket.onclose = (event) => {
+  transport.on('disconnect', () => {
     _logDebug?.("API: Disconnected from signaling server");
     uiAdapter.updateStatus("Disconnected from signaling server", true);
     
-    // Dispatch disconnection event with clean/unclean status and attempts
+    // Dispatch disconnection event
     document.dispatchEvent(new CustomEvent('signaling:disconnected', {
-      detail: {
-        url,
-        wasClean: event.wasClean,
-        attempts: reconnectAttempts + 1
-      }
+      detail: { wasClean: true }  // Most transports don't provide this info
     }));
-    
-    signalingSocket = null; // Clear socket reference
-  };
+  });
 
-  signalingSocket.onmessage = (event) => {
+  transport.on('registered', (peerId, peers) => {
+    _logDebug?.(`API: Registered as peer: ${peerId}`);
+    _logDebug?.("API: Available peers:", peers);
+    
+    if (peers && peers.length > 0) {
+      uiAdapter.updateStatus(`Connected! ${peers.length} peers available`);
+      uiAdapter.updatePeerList(peers);
+      
+      // Dispatch event for auto-connection
+      document.dispatchEvent(new CustomEvent('api:registered', {
+        detail: { peers: peers }
+      }));
+    } else {
+      uiAdapter.updateStatus("Connected! No other peers available yet.");
+      uiAdapter.updatePeerList([]);
+    }
+  });
+
+  transport.on('new_peer', (peerId) => {
+    if (peerId) {
+      _logDebug?.(`API: New peer joined: ${peerId}`);
+      uiAdapter.updateStatus(`New peer discovered: ${peerId.substring(0, 8)}...`);
+      
+      // Get updated peer list if available
+      const peerList = transport.getRegisteredPeers?.() || [];
+      if (peerList.length > 0) {
+        uiAdapter.updatePeerList(peerList);
+      }
+      
+      // Dispatch event for auto-connection
+      document.dispatchEvent(new CustomEvent('api:new_peer', {
+        detail: { peerId: peerId }
+      }));
+    }
+  });
+
+  transport.on('signal', (peerId, signal) => {
+    if (!peerId || !signal) {
+      _logDebug?.("API: Invalid signal data received");
+      return;
+    }
+    
+    _logDebug?.(`API: Signal from: ${peerId?.substring(0, 8)}...`, signal);
+    
+    if (!connectedPeers.has(peerId) && !pendingConnections.has(peerId)) {
+      pendingConnections.set(peerId, Date.now());
+      uiAdapter.updateStatus(`Incoming connection from: ${peerId.substring(0, 8)}...`);
+    }
+    
     try {
-      const data = JSON.parse(event.data);
-      _logDebug?.("API: Received:", data.type, data);
+      _logDebug?.(`API: Processing signal from: ${peerId.substring(0, 8)}..., type: ${signal.type}`);
+      
+      // Filter out signal types that the DHT doesn't support
+      // This fixes the "Invalid signal data" error by ensuring only WebRTC-compatible
+      // signal types are passed to the DHT instance, while other transport-level
+      // signal types like PING are handled appropriately
+      const validDhtSignalTypes = ['offer', 'answer', 'candidate', 'renegotiate'];
+      
+      if (validDhtSignalTypes.includes(signal.type)) {
+        // Pass WebRTC signal to DHT instance
+        _logDebug?.(`API: Processing valid ${signal.type} signal from ${peerId.substring(0, 8)}...`);
+        dhtInstance.signal({
+          id: peerId,
+          signal: signal,
+          viaDht: false // Signal came via transport
+        });
+      } else {
+        _logDebug?.(`API: Ignoring unsupported signal type: ${signal.type}`);
+        // Handle specific signal types that need processing but aren't for DHT
+        // These are transport-level signals that don't need to be forwarded to the DHT
+        if (signal.type === 'PING') {
+          _logDebug?.('API: Received PING signal, no action needed');
+          // Could implement pong response here if needed
+        } else if (signal.type === 'ROUTE_TEST') {
+          _logDebug?.('API: Received ROUTE_TEST signal, no action needed');
+        } else if (signal.type === 'SIGNAL') {
+          _logDebug?.('API: Received SIGNAL signal, no action needed');
+        }
+      }
+    } catch (signalError) {
+      _logDebug("API: Error processing signal:", signalError);
+      uiAdapter.updateStatus(`Signal error: ${signalError.message}`, true);
+    }
+  });
+
+  transport.on('server_error', (message) => {
+    _logDebug?.("API: Server error:", message);
+    uiAdapter.updateStatus(`Error: ${message}`, true);
+  });
+  
+  // Handle unknown messages
+  transport.on('unknown_message', (message) => {
+    try {
+      _logDebug?.("API: Received unknown message:", message);
 
       switch (data.type) {
         case "registered":
@@ -545,7 +730,7 @@ export function connectSignaling(url, options = {}) {
       _logDebug("API: Error processing message:", err);
       uiAdapter.updateStatus("Error processing message from server", true);
     }
-  };
+  });
 }
 
 /**

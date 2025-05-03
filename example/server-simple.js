@@ -34,8 +34,18 @@ wss.on('connection', (ws) => {
 
       if (data.type === 'register' && data.peerId) {
         peerId = data.peerId;
+        
+        // Check if this peer ID is already registered
+        const isDuplicate = peers.has(peerId);
+        
+        // Update the WebSocket connection for this peer ID
         peers.set(peerId, ws);
-        console.log(`Registered: ${peerId}`);
+        
+        if (isDuplicate) {
+          console.log(`Registered: ${peerId} (reconnection)`);
+        } else {
+          console.log(`Registered: ${peerId}`);
+        }
 
         // Get list of other peers (XOR distance calculation moved to transport files)
         const peerList = Array.from(peers.keys())
@@ -47,18 +57,21 @@ wss.on('connection', (ws) => {
           peers: peerList
         }));
 
-        // Notify all peers about the new peer (filtering by XOR distance moved to transport files)
-        Array.from(peers.entries())
-          .filter(([existingId, _]) => existingId !== peerId)
-          .forEach(([id, ws]) => {
-            if (ws.readyState === 1) {
-              ws.send(JSON.stringify({
-                type: 'new_peer',
-                peerId: peerId
-              }));
-              console.log(`Notified peer ${id.substring(0, 8)} about new peer ${peerId.substring(0, 8)}`);
-            }
-          });
+        // Only notify other peers if this is a new registration, not a reconnection
+        if (!isDuplicate) {
+          // Notify all peers about the new peer (filtering by XOR distance moved to transport files)
+          Array.from(peers.entries())
+            .filter(([existingId, _]) => existingId !== peerId)
+            .forEach(([id, ws]) => {
+              if (ws.readyState === 1) {
+                ws.send(JSON.stringify({
+                  type: 'new_peer',
+                  peerId: peerId
+                }));
+                console.log(`Notified peer ${id.substring(0, 8)} about new peer ${peerId.substring(0, 8)}`);
+              }
+            });
+        }
       }
       else if (data.type === 'signal' && data.target && data.signal) {
         const targetWs = peers.get(data.target);

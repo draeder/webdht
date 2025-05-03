@@ -238,41 +238,10 @@ class KBucket {
  * Main DHT implementation
  */
 class DHT extends EventEmitter {
-  /**
-   * Create a new DHT node
-   * @param {Object} options - DHT options
-   * @param {Buffer|string} options.nodeId - Node ID (optional, random if not provided)
-   * @param {Array} options.bootstrap - Bootstrap nodes (optional)
-   */
-
-  /**
-   * Disconnect from a peer
-   * @param {string} peerId - ID of peer to disconnect
-   */
-  disconnect(peerId) {
-    const peer = this.peers.get(peerId);
-    if (peer) {
-      // Clean up peer connection
-      peer.destroy();
-      this.peers.delete(peerId);
-
-      // Remove from routing table
-      for (let i = 0; i < this.BUCKET_COUNT; i++) {
-        this.buckets[i].remove(peerId);
-      }
-
-      // Clean up any stored data for this peer
-      for (const [key, value] of this.storage.entries()) {
-        if (value.replicatedTo && value.replicatedTo.has(peerId)) {
-          value.replicatedTo.delete(peerId);
-        }
-      }
-    }
-    // Always emit disconnect event, even if peer wasn't found
-    this.emit("peer:disconnect", peerId, "disconnected");
-  }
   constructor(options = {}) {
     super();
+    this.processedCandidates = new Set();
+
     // Initialize Kademlia parameters with defaults or user-provided values
     console.log("🥰", "DHT options", options)
     this.K = options.k || DEFAULT_K;
@@ -767,7 +736,12 @@ class DHT extends EventEmitter {
       const furthestPeer = this._findFurthestPeer();
       if (furthestPeer && this._shouldReplacePeer(peerId, furthestPeer)) {
         // Disconnect the furthest peer
-        this.disconnect(furthestPeer);
+        const peerToRemove = this.peers.get(furthestPeer);
+        if (peerToRemove) {
+          peerToRemove.destroy();
+          this.peers.delete(furthestPeer);
+          this.emit("peer:disconnect", furthestPeer, "replaced");
+        }
       } else {
         throw new Error(
           "Max peers reached and new peer not closer than existing peers"
@@ -816,26 +790,33 @@ class DHT extends EventEmitter {
       this._logDebug(`Connected to new peer ${peerId.substring(0, 8)}..., discovering more peers`);
       
       // If we have other peers, try to establish DHT routes between this new peer and existing peers
-      // But limit to only one direction to reduce signaling traffic
       if (this.peers.size > 1) {
+        // Wait 500ms to ensure stable connection before routing
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Check if still connected after delay
+        if (!peer.connected) return;
+        
         this._logDebug(`Establishing DHT routes for new peer ${peerId.substring(0, 8)}...`);
         
-        // For each existing peer (except the new one), try to establish a DHT route to the new peer
-        // Establish routes to more peers to improve DHT connectivity
-        const existingPeerEntries = Array.from(this.peers.entries())
+        // Get currently connected peers (may have changed during wait)
+        const peersToRoute = Array.from(this.peers.entries())
           .filter(([existingPeerId, existingPeer]) =>
-            existingPeerId !== peerId && existingPeer.connected);
+            existingPeerId !== peerId &&
+            existingPeer.connected &&
+            !existingPeer._hasRoutedTo(peerId));
         
-        // Increase the number of peers to establish routes with to improve DHT connectivity
-        // Use all available peers instead of just 3
-        const peersToRoute = existingPeerEntries;
+        // Track routed peers to prevent duplicate attempts
+        peer._routedPeers = new Set();
         
         for (const [existingPeerId, existingPeer] of peersToRoute) {
           this._logDebug(`Establishing DHT route between ${existingPeerId.substring(0, 8)}... and ${peerId.substring(0, 8)}...`);
           
           // Only establish route in one direction to reduce signaling traffic
           // The reverse route will be established when needed
-          this._routeSignalThroughDHT(existingPeerId, peerId, { type: "PING" }, 2, [this.nodeIdHex]);
+          this._routeSignalThroughDHT(existingPeerId, peerId, { type: "PING", sender: this.nodeIdHex }, 2, [this.nodeIdHex]);
+          existingPeer._addRoutedPeer(peerId);
+          peer._addRoutedPeer(existingPeerId);
         }
       }
       
@@ -880,6 +861,8 @@ class DHT extends EventEmitter {
    * @private
    */
   _setupPeerHandlers(peer) {
+    // Track processed candidates
+    const processedCandidates = new Set();
     // Forward signal events
     peer.on("signal", (data, peerId) => {
       // Detect WebRTC signaling messages
@@ -887,6 +870,12 @@ class DHT extends EventEmitter {
       
       // For WebRTC signaling, always use the server to ensure reliable connection establishment
       if (isWebRTCSignal) {
+        const candidateKey = `${peerId}:${data.candidate}`;
+        if (this.processedCandidates.has(candidateKey)) {
+          this._logDebug(`Skipping duplicate candidate for ${peerId}`);
+          return;
+        }
+        this.processedCandidates.add(candidateKey);
         this._logDebug(`Using server for WebRTC signal to ${peerId}`);
         this._serverSignalAttempts++;
         this._logDebug(`Signal stats - DHT: ${this._dhtSignalAttempts}, Server: ${this._serverSignalAttempts}, Ratio: ${Math.round((this._dhtSignalAttempts / (this._dhtSignalAttempts + this._serverSignalAttempts)) * 100)}%`);
@@ -1038,7 +1027,7 @@ class DHT extends EventEmitter {
             type: "SIGNAL",
             sender: this.nodeIdHex,
             originalSender: peerId,
-            signal: { type: "PING" },
+            signal: { type: "PING", sender: peerId },
             target: routePeerId,
             ttl: 3,
             viaDht: true,
@@ -1076,7 +1065,27 @@ class DHT extends EventEmitter {
    * @param {Object} data.signal - WebRTC signal data
    */
   signal(data) {
-    if (!data || !data.id || !data.signal) return null;
+    if (!data || typeof data !== 'object' || !data.id || !data.signal) {
+      this.emit('error', new Error('Invalid signal data: Must be an object with id and signal properties'));
+      return null;
+    }
+
+    const validTypes = ['offer', 'answer', 'candidate', 'renegotiate', 'PING', 'SIGNAL', 'ROUTE_TEST'];
+    if (!validTypes.includes(data.signal.type)) {
+      this.emit('error', new Error(`Invalid signal data: Signal type must be one of ${validTypes.join(', ')}`));
+      return null;
+    }
+    
+    // Validate transport-specific signals
+    if (data.signal.type === 'PING' && !data.signal.sender) {
+      this.emit('error', new Error('Invalid PING signal: Missing sender'));
+      return null;
+    }
+    
+    if (data.signal.type === 'SIGNAL' && !data.signal.target) {
+      this.emit('error', new Error('Invalid SIGNAL message: Missing target'));
+      return null;
+    }
 
     const peerId = data.id;
     const viaDht = data.viaDht || false;
@@ -1099,8 +1108,34 @@ class DHT extends EventEmitter {
     if (this.peers.has(peerId)) {
       const peer = this.peers.get(peerId);
       
-      // Pass the signal to the peer
-      peer.signal(data.signal);
+      // Handle DHT-specific signals differently than WebRTC signals
+      if (['PING', 'SIGNAL', 'ROUTE_TEST'].includes(data.signal.type)) {
+        this._logDebug(`Processing DHT-specific signal type: ${data.signal.type} from ${peerId.substring(0, 8)}...`);
+        
+        // For PING signals, we need to convert them to a DHT protocol message and process it
+        if (data.signal.type === 'PING') {
+          this._logDebug(`Converting PING signal to DHT message from ${peerId.substring(0, 8)}...`);
+          // Create a DHT message and handle it directly
+          const pingMessage = {
+            type: 'PING',
+            sender: data.signal.sender || peerId
+          };
+          this._handlePing(pingMessage, peerId);
+        }
+        // For SIGNAL messages, handle similar to PING but with appropriate routing
+        else if (data.signal.type === 'SIGNAL') {
+          this._logDebug(`Converting SIGNAL to DHT message from ${peerId.substring(0, 8)}...`);
+          this._handleSignal(data.signal, peerId);
+        }
+        // For other DHT-specific signals, pass them through
+        else {
+          peer.signal(data.signal);
+        }
+      }
+      // For standard WebRTC signals, pass them directly to the peer
+      else {
+        peer.signal(data.signal);
+      }
       
       // Implement the specific signaling flow:
       // If this is a bootstrap peer receiving a signal from a new peer via server,
@@ -1120,7 +1155,7 @@ class DHT extends EventEmitter {
             
           if (otherPeers.length > 0) {
             // First, establish a DHT route back to the signaling peer
-            this._routeSignalThroughDHT(peerId, this.nodeIdHex, { type: "PING" }, 2, [this.nodeIdHex]);
+            this._routeSignalThroughDHT(peerId, this.nodeIdHex, { type: "PING", sender: this.nodeIdHex }, 2, [this.nodeIdHex]);
             
             // Then, establish routes between this new peer and other existing peers
             for (const [otherPeerId, otherPeer] of otherPeers) {
@@ -1132,7 +1167,7 @@ class DHT extends EventEmitter {
                   type: "SIGNAL",
                   sender: this.nodeIdHex,
                   originalSender: peerId,
-                  signal: { type: "PING" },
+                  signal: { type: "PING", sender: peerId },
                   target: otherPeerId,
                   ttl: 2,
                   viaDht: true,
@@ -1144,7 +1179,7 @@ class DHT extends EventEmitter {
                   type: "SIGNAL",
                   sender: this.nodeIdHex,
                   originalSender: otherPeerId,
-                  signal: { type: "PING" },
+                  signal: { type: "PING", sender: otherPeerId },
                   target: peerId,
                   ttl: 2,
                   viaDht: true,
@@ -1189,9 +1224,13 @@ class DHT extends EventEmitter {
       simplePeerOptions: peerSpecificOptions || this.simplePeerOptions
     });
 
-    this.peers.set(peerId, peer);
-    this._setupPeerHandlers(peer);
-    peer.signal(data.signal);
+    if (data?.signal && typeof data.signal === 'object') {
+      this.peers.set(peerId, peer);
+      this._setupPeerHandlers(peer);
+      peer.signal(data.signal);
+    } else {
+      this._logDebug("Invalid signal format in DHT routing", data);
+    }
 
     // After establishing connection, try to discover more peers through this new peer
     peer.once("connect", async () => {
@@ -1226,7 +1265,7 @@ class DHT extends EventEmitter {
                 type: "SIGNAL",
                 sender: this.nodeIdHex,
                 originalSender: peerId,
-                signal: { type: "PING" },
+                signal: { type: "PING", sender: peerId },
                 target: otherPeerId,
                 ttl: 2,
                 viaDht: true,
@@ -1238,7 +1277,7 @@ class DHT extends EventEmitter {
                 type: "SIGNAL",
                 sender: this.nodeIdHex,
                 originalSender: otherPeerId,
-                signal: { type: "PING" },
+                signal: { type: "PING", sender: otherPeerId },
                 target: peerId,
                 ttl: 2,
                 viaDht: true,
@@ -1726,6 +1765,10 @@ class DHT extends EventEmitter {
           
           if (routePeer && routePeer.connected) {
             this._logDebug(`Using known DHT-capable route to ${targetId.substring(0, 8)}... via ${routeId.substring(0, 8)}...`);
+              
+            // Compress the signal if enabled
+            const signalToSend = this.SIGNAL_COMPRESSION_ENABLED ?
+              this._compressSignal(signal) : signal;
               
             routePeer.send({
               type: "SIGNAL",

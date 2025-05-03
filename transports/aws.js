@@ -406,8 +406,22 @@ class AWSTransport extends EventEmitter {
       this._logDebug("Cannot signal: no local peer ID set");
       return false;
     }
+    
+    if (!signal || typeof signal !== 'object') {
+      this._logDebug("Invalid signal format");
+      this.emit("error", new Error("Signal must be an object"));
+      return false;
+    }
+    
+    const validTypes = ['offer', 'answer', 'candidate', 'renegotiate'];
+    if (!validTypes.includes(signal.type)) {
+      this._logDebug(`Invalid signal type: ${signal.type}`);
+      this.emit("error", new Error(`Invalid signal type: ${signal.type}`));
+      return false;
+    }
+    
     return this.send({
-      action: "signal",  // Uses 'action' instead of 'type' for API Gateway compatibility
+      action: "signal",
       target: targetPeerId,
       signal
     });
