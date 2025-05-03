@@ -24,6 +24,21 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 const peers = new Map();
 
+const stats = {
+  interval: {
+    messages: { total: 0, inbound: 0, outbound: 0 },
+    signals: { offer: 0, answer: 0, candidate: 0, other: 0 },
+    errors: 0,
+    successfulRelays: 0
+  },
+  lifetime: {
+    messages: { total: 0, inbound: 0, outbound: 0 },
+    signals: { offer: 0, answer: 0, candidate: 0, other: 0 },
+    errors: 0,
+    successfulRelays: 0
+  }
+};
+
 wss.on('connection', (ws) => {
   console.log('New connection');
   let peerId = null;
@@ -34,66 +49,65 @@ wss.on('connection', (ws) => {
 
       if (data.type === 'register' && data.peerId) {
         peerId = data.peerId;
-        
-        // Check if this peer ID is already registered
         const isDuplicate = peers.has(peerId);
-        
-        // Update the WebSocket connection for this peer ID
         peers.set(peerId, ws);
-        
-        if (isDuplicate) {
-          console.log(`Registered: ${peerId} (reconnection)`);
-        } else {
-          console.log(`Registered: ${peerId}`);
-        }
 
-        // Get list of other peers (XOR distance calculation moved to transport files)
-        const peerList = Array.from(peers.keys())
-          .filter(id => id !== peerId);
-        
+        console.log(`Registered: ${peerId}${isDuplicate ? ' (reconnection)' : ''}`);
+
+        const peerList = Array.from(peers.keys()).filter(id => id !== peerId);
         ws.send(JSON.stringify({
           type: 'registered',
-          peerId: peerId,
+          peerId,
           peers: peerList
         }));
 
-        // Only notify other peers if this is a new registration, not a reconnection
         if (!isDuplicate) {
-          // Notify all peers about the new peer (filtering by XOR distance moved to transport files)
           Array.from(peers.entries())
-            .filter(([existingId, _]) => existingId !== peerId)
-            .forEach(([id, ws]) => {
-              if (ws.readyState === 1) {
-                ws.send(JSON.stringify({
+            .filter(([existingId]) => existingId !== peerId)
+            .forEach(([existingId, peerWs]) => {
+              if (peerWs.readyState === 1) {
+                peerWs.send(JSON.stringify({
                   type: 'new_peer',
-                  peerId: peerId
+                  peerId
                 }));
-                console.log(`Notified peer ${id.substring(0, 8)} about new peer ${peerId.substring(0, 8)}`);
+                console.log(
+                  `Notified peer ${existingId.substring(0, 8)} about new peer ${peerId.substring(0, 8)}`
+                );
               }
             });
         }
-      }
-      else if (data.type === 'signal' && data.target && data.signal) {
+
+      } else if (data.type === 'signal' && data.target && data.signal) {
         const targetWs = peers.get(data.target);
         if (targetWs && targetWs.readyState === 1) {
-          stats.messages.total++;
-          stats.messages.outbound++;
-          stats.successfulRelays++;
-          
+          stats.interval.messages.total++;
+          stats.interval.messages.outbound++;
+          stats.interval.successfulRelays++;
+          stats.lifetime.messages.total++;
+          stats.lifetime.messages.outbound++;
+          stats.lifetime.successfulRelays++;
+
           const signalType = data.signal.type?.toLowerCase() || 'other';
-          stats.signals[signalType] = (stats.signals[signalType] || 0) + 1;
-          
+          stats.interval.signals[signalType] = (stats.interval.signals[signalType] || 0) + 1;
+          stats.lifetime.signals[signalType] = (stats.lifetime.signals[signalType] || 0) + 1;
+
           targetWs.send(JSON.stringify({
             type: 'signal',
-            peerId: peerId,
+            peerId,
             signal: data.signal
           }));
-          
-          console.log(`Signal ${signalType.toUpperCase()} relayed ${peerId.substring(0, 8)}→${data.target.substring(0, 8)}`);
+
+          console.log(
+            `Signal ${signalType.toUpperCase()} relayed ${peerId.substring(0, 8)}→${data.target.substring(0, 8)}`
+          );
         } else {
-          stats.errors++;
-          stats.messages.total++;
-          stats.messages.inbound++;
+          stats.interval.errors++;
+          stats.interval.messages.total++;
+          stats.interval.messages.inbound++;
+          stats.lifetime.errors++;
+          stats.lifetime.messages.total++;
+          stats.lifetime.messages.inbound++;
+
           ws.send(JSON.stringify({
             type: 'error',
             message: 'Target peer not available'
@@ -113,41 +127,40 @@ wss.on('connection', (ws) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Signaling server running on port ${PORT}`);
-});
-
-const stats = {
-  messages: { total: 0, inbound: 0, outbound: 0 },
-  signals: { offer: 0, answer: 0, candidate: 0, other: 0 },
-  errors: 0,
-  successfulRelays: 0
-};
-
-// Periodic stats logging
 setInterval(() => {
-  const successRate = stats.successfulRelays > 0 
-    ? ((stats.successfulRelays / stats.messages.total) * 100).toFixed(1)
-    : 0;
+  const intervalSeconds = 30;
+  const totalMessages = stats.interval.messages.total;
+  const successRate = totalMessages > 0
+    ? ((stats.interval.successfulRelays / totalMessages) * 100).toFixed(1)
+    : '0.0';
 
-  const hasActivity = stats.messages.total > 0
-    || stats.signals.offer > 0
-    || stats.signals.answer > 0
-    || stats.signals.candidate > 0
-    || stats.signals.other > 0
-    || stats.errors > 0;
+  const hasActivity = totalMessages > 0
+    || Object.values(stats.interval.signals).some(count => count > 0)
+    || stats.interval.errors > 0;
 
   if (hasActivity) {
-    console.log(`[Stats] Messages: ${stats.messages.total} (IN: ${stats.messages.inbound}, OUT: ${stats.messages.outbound}) | ` +
-      `Signals: OFFER=${stats.signals.offer} ANSWER=${stats.signals.answer} CANDIDATE=${stats.signals.candidate} OTHER=${stats.signals.other} | ` +
-      `Success Rate: ${successRate}% | Errors: ${stats.errors}`);
+    console.log(
+      `[Stats] Last ${intervalSeconds}s: Messages: ${stats.interval.messages.total} ` +
+      `(IN: ${stats.interval.messages.inbound}, OUT: ${stats.interval.messages.outbound}) | ` +
+      `Signals: OFFER=${stats.interval.signals.offer} ANSWER=${stats.interval.signals.answer} ` +
+      `CANDIDATE=${stats.interval.signals.candidate} OTHER=${stats.interval.signals.other}\n` +
+      `Lifetime: Messages: ${stats.lifetime.messages.total} ` +
+      `(IN: ${stats.lifetime.messages.inbound}, OUT: ${stats.lifetime.messages.outbound}) | ` +
+      `Signals: OFFER=${stats.lifetime.signals.offer} ANSWER=${stats.lifetime.signals.answer} ` +
+      `CANDIDATE=${stats.lifetime.signals.candidate} OTHER=${stats.lifetime.signals.other} | ` +
+      `Success Rate: ${successRate}% | Errors: ${stats.interval.errors}`
+    );
   }
 
   // Reset counters
-  Object.assign(stats, {
+  Object.assign(stats.interval, {
     messages: { total: 0, inbound: 0, outbound: 0 },
     signals: { offer: 0, answer: 0, candidate: 0, other: 0 },
     errors: 0,
     successfulRelays: 0
   });
 }, 30000);
+
+server.listen(PORT, () => {
+  console.log(`Signaling server running on port ${PORT}`);
+});
