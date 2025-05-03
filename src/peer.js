@@ -191,7 +191,7 @@ class Peer extends EventEmitter {
       !data ||
       typeof data !== "object" ||
       !data.type ||
-      !["offer", "answer", "candidate", "renegotiate", "PING", "SIGNAL", "ROUTE_TEST"].includes(data.type)
+      !["offer", "answer", "candidate", "renegotiate", "PING", "PONG", "SIGNAL", "ROUTE_TEST"].includes(data.type)
     ) {
       this._logDebug(`Invalid signal`, data);
       throw new Error("Invalid signal data");
@@ -205,6 +205,10 @@ class Peer extends EventEmitter {
       throw new Error("SDP missing");
     }
 
+// Enhanced logging for ICE candidate handling
+    if (data.type === 'candidate' && data.candidate) {
+      console.log(`[ICE Debug] Received ICE candidate in peer.js: ${data.candidate.substring(0, 30)}...`);
+    }
     if (data.type === 'candidate' && data.candidate) {
       if (this.receivedCandidates.has(data.candidate)) {
         this._logDebug(`Duplicate ICE candidate, skipping`);

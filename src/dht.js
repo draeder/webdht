@@ -861,8 +861,6 @@ class DHT extends EventEmitter {
    * @private
    */
   _setupPeerHandlers(peer) {
-    // Track processed candidates
-    const processedCandidates = new Set();
     // Forward signal events
     peer.on("signal", (data, peerId) => {
       // Detect WebRTC signaling messages
@@ -870,12 +868,25 @@ class DHT extends EventEmitter {
       
       // For WebRTC signaling, always use the server to ensure reliable connection establishment
       if (isWebRTCSignal) {
-        const candidateKey = `${peerId}:${data.candidate}`;
-        if (this.processedCandidates.has(candidateKey)) {
-          this._logDebug(`Skipping duplicate candidate for ${peerId}`);
-          return;
+        // Enhanced ICE candidate debugging
+        if (data.type === 'candidate') {
+          console.log(`[DHT Debug] Processing ICE candidate in dht.js. PeerId: ${peerId.substr(0, 8)}...`);
+          console.log(`[DHT Debug] ICE candidate data: ${JSON.stringify(data).substring(0, 100)}...`);
+          
+          // Properly check if this is a valid ICE candidate with actual candidate data
+          // Only deduplicate when we have a valid candidate string
+          if (data.candidate && typeof data.candidate === 'string' && data.candidate.trim().length > 0) {
+            const candidateKey = `${peerId}:${data.candidate}`;
+            if (this.processedCandidates.has(candidateKey)) {
+              this._logDebug(`Skipping duplicate candidate for ${peerId}`);
+              return;
+            }
+            this.processedCandidates.add(candidateKey);
+            this._logDebug(`Added new unique ICE candidate for ${peerId}`);
+          } else {
+            this._logDebug(`Received candidate signal without valid candidate data for ${peerId}, passing through`);
+          }
         }
-        this.processedCandidates.add(candidateKey);
         this._logDebug(`Using server for WebRTC signal to ${peerId}`);
         this._serverSignalAttempts++;
         this._logDebug(`Signal stats - DHT: ${this._dhtSignalAttempts}, Server: ${this._serverSignalAttempts}, Ratio: ${Math.round((this._dhtSignalAttempts / (this._dhtSignalAttempts + this._serverSignalAttempts)) * 100)}%`);

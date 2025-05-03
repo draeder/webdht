@@ -436,41 +436,164 @@ async function initApp() {
         
         // If this is a new signal attempt with a peer we've previously tried to connect to
         if (!peerState.signalStartTime) {
+          // Check if peer is already connected before setting up signal timeout
+          if ((dht || window.dhtInstance) && (dht?.peers?.has(targetPeerId) || window.dhtInstance?.peers?.has(targetPeerId))) {
+            // Get the peer from either dht or window.dhtInstance
+            const peer = dht?.peers?.get(targetPeerId) || window.dhtInstance?.peers?.get(targetPeerId);
+            if (peer && peer.connected) {
+              console.log(`Skipping signal to already connected peer ${peerShortId}...`);
+              // Update connection state to reflect established connection
+              connectionAttempts.set(targetPeerId, {
+                ...peerState,
+                status: 'connected',
+                signalStartTime: null,
+                timeoutId: null
+              });
+              return; // Skip signaling process for already connected peers
+            }
+          }
+          
           // Set signal start time for timeout tracking
           peerState.signalStartTime = Date.now();
           
           // Create a timeout to detect stalled signal exchanges
+          // Debug ICE candidate signaling
+          console.log(`Setting up signal timeout for ${peerShortId}... Candidate count: ${(dht?.processedCandidates || window.dhtInstance?.processedCandidates)?.size || 0}`);
+          
           const timeoutId = setTimeout(() => {
-            console.warn(`Signal exchange with ${peerShortId}... timed out after ${SIGNAL_TIMEOUT}ms`);
+            // Enhanced connection status verification before declaring timeout
+            // This prevents false positives in multiple scenarios
             
-            // Update connection state
-            if (connectionAttempts.has(targetPeerId)) {
-              const currentState = connectionAttempts.get(targetPeerId);
-              const retryCount = (currentState.retries || 0) + 1;
+            // Check #1: Verify peer connection through the DHT instance
+            let isConnected = false;
+            let connectionState = 'unknown';
+            
+            if ((dht || window.dhtInstance) &&
+                (dht?.peers?.has(targetPeerId) || window.dhtInstance?.peers?.has(targetPeerId))) {
+              const peer = dht?.peers?.get(targetPeerId) || window.dhtInstance?.peers?.get(targetPeerId);
               
-              if (retryCount > MAX_CONNECTION_RETRIES) {
-                // Mark peer as temporarily unavailable after max retries
-                connectionAttempts.set(targetPeerId, {
-                  ...currentState,
-                  status: 'unavailable',
-                  retries: retryCount,
-                  lastTried: Date.now()
-                });
-                
-                browserUiAdapter.updateStatus(
-                  `Connection to ${peerShortId}... failed after ${MAX_CONNECTION_RETRIES} attempts`,
-                  true
-                );
-              } else {
-                // Track retry attempt
-                connectionAttempts.set(targetPeerId, {
-                  ...currentState,
-                  status: 'timeout',
-                  retries: retryCount,
-                  lastTried: Date.now()
-                });
+              // Check direct connection status
+              if (peer && peer.connected) {
+                isConnected = true;
+                connectionState = 'connected-direct';
+              }
+              
+              // Check internal SimplePeer state if available
+              if (peer && peer._peer && typeof peer._peer.connectionState === 'string') {
+                connectionState = peer._peer.connectionState; // 'connected', 'completed', etc.
+                if (['connected', 'completed'].includes(peer._peer.connectionState)) {
+                  isConnected = true;
+                }
+              }
+              
+              // Check for any data channels that might be open
+              if (peer && peer._peer && peer._peer.dataChannel &&
+                  peer._peer.dataChannel.readyState === 'open') {
+                isConnected = true;
+                connectionState = 'datachannel-open';
               }
             }
+            
+            // Check #2: Verify through connection attempts map status
+            if (connectionAttempts.has(targetPeerId)) {
+              const currentState = connectionAttempts.get(targetPeerId);
+              if (currentState.status === 'connected') {
+                isConnected = true;
+                connectionState = 'already-marked-connected';
+              }
+            }
+            
+            // Log detailed connection state for debugging
+            console.log(`Connection check for ${peerShortId} before timeout: state=${connectionState}, connected=${isConnected}`);
+            
+            if (isConnected) {
+              console.log(`Connection verified for ${peerShortId} - not reporting timeout`);
+              // Update state to reflect verified connection
+              if (connectionAttempts.has(targetPeerId)) {
+                const currentState = connectionAttempts.get(targetPeerId);
+                connectionAttempts.set(targetPeerId, {
+                  ...currentState,
+                  status: 'connected',
+                  signalStartTime: null,
+                  timeoutId: null
+                });
+              }
+              return; // Don't process the timeout
+            }
+            
+            console.warn(`Signal exchange with ${peerShortId}... timed out after ${SIGNAL_TIMEOUT}ms (connection state: ${connectionState})`);
+            
+            // Final verification with grace period before reporting timeout
+            setTimeout(() => {
+              // Perform one final check before confirming timeout
+              let finalConnected = false;
+              let finalConnectionState = connectionState;
+              
+              if ((dht || window.dhtInstance) &&
+                  (dht?.peers?.has(targetPeerId) || window.dhtInstance?.peers?.has(targetPeerId))) {
+                const peer = dht?.peers?.get(targetPeerId) || window.dhtInstance?.peers?.get(targetPeerId);
+                
+                // Check if connection succeeded during grace period
+                if (peer && peer.connected) {
+                  finalConnected = true;
+                  finalConnectionState = 'connected-during-grace';
+                }
+                
+                // Also check internal SimplePeer state
+                if (peer && peer._peer && typeof peer._peer.connectionState === 'string') {
+                  finalConnectionState = peer._peer.connectionState;
+                  if (['connected', 'completed'].includes(peer._peer.connectionState)) {
+                    finalConnected = true;
+                  }
+                }
+              }
+              
+              console.log(`Final connection check for ${peerShortId} after grace period: ${finalConnectionState}`);
+              
+              // If connection succeeded during grace period, update state and exit
+              if (finalConnected) {
+                console.log(`Connection succeeded during grace period for ${peerShortId}`);
+                if (connectionAttempts.has(targetPeerId)) {
+                  const currentState = connectionAttempts.get(targetPeerId);
+                  connectionAttempts.set(targetPeerId, {
+                    ...currentState,
+                    status: 'connected',
+                    signalStartTime: null,
+                    timeoutId: null
+                  });
+                }
+                return;
+              }
+              
+              // If still not connected, update connection state
+              if (connectionAttempts.has(targetPeerId)) {
+                const currentState = connectionAttempts.get(targetPeerId);
+                const retryCount = (currentState.retries || 0) + 1;
+                
+                if (retryCount > MAX_CONNECTION_RETRIES) {
+                  // Mark peer as temporarily unavailable after max retries
+                  connectionAttempts.set(targetPeerId, {
+                    ...currentState,
+                    status: 'unavailable',
+                    retries: retryCount,
+                    lastTried: Date.now()
+                  });
+                  
+                  browserUiAdapter.updateStatus(
+                    `Connection to ${peerShortId}... failed after ${MAX_CONNECTION_RETRIES} attempts`,
+                    true
+                  );
+                } else {
+                  // Track retry attempt
+                  connectionAttempts.set(targetPeerId, {
+                    ...currentState,
+                    status: 'timeout',
+                    retries: retryCount,
+                    lastTried: Date.now()
+                  });
+                }
+              }
+            }, 1000); // 1-second grace period
           }, SIGNAL_TIMEOUT);
           
           // Store the timeout ID so we can clear it if connection succeeds
@@ -498,8 +621,8 @@ async function initApp() {
         return;
       }
       
-      // Validate signal type - include PING as a valid type
-      if (!['offer', 'answer', 'candidate', 'renegotiate', 'PING'].includes(data.signal.type)) {
+      // Validate signal type - include all valid signal types
+      if (!['offer', 'answer', 'candidate', 'renegotiate', 'PING', 'SIGNAL', 'ROUTE_TEST'].includes(data.signal.type)) {
         console.warn(`Unknown signal type: ${data.signal.type} - allowing it anyway for compatibility`);
         // Don't return/block unknown signal types, just log a warning
       }
@@ -720,7 +843,7 @@ function connectToSignalingServerWithRetry(url) {
       }
       
       // Validate signal type - make consistent with outgoing signal validation
-      if (!['offer', 'answer', 'candidate', 'renegotiate', 'PING'].includes(signal.type)) {
+      if (!['offer', 'answer', 'candidate', 'renegotiate', 'PING', 'SIGNAL', 'ROUTE_TEST'].includes(signal.type)) {
         console.error('Unknown signal type from server:', signal.type);
         return;
       }
@@ -978,11 +1101,20 @@ function attemptAutomaticPeerConnection(peerId) {
         .then(() => {
           console.log(`Auto-connected to peer: ${peerShortId}...`);
           
+          // Get the current state
+          const currentState = connectionAttempts.get(peerId) || {};
+          
+          // Clear any pending timeouts for this peer
+          if (currentState.timeoutId) {
+            clearTimeout(currentState.timeoutId);
+          }
+          
           // Update connection state
           connectionAttempts.set(peerId, {
-            ...connectionAttempts.get(peerId),
+            ...currentState,
             status: 'connected',
-            connectedAt: Date.now()
+            connectedAt: Date.now(),
+            timeoutId: null  // Explicitly set to null to prevent timeout issues
           });
           
           // Ensure UI reflects the new connection
@@ -1097,7 +1229,8 @@ function setupUIEventListeners() {
   });
 
   // Connect to Peer Button
-  safeAddEventListener("connectPeerBtn", "onclick", () => {
+  safeAddEventListener("connectPeerBtn", "onclick", (event) => {
+    event.preventDefault(); // Prevent default form submission
     const peerId = uiElements.connectPeerId.value;
     if (peerId) {
       connectToPeer(peerId); // Use API function

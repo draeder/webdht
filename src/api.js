@@ -69,7 +69,7 @@ export function initializeApi(dht, adapter, debug = false) {
       return;
     }
     
-    const validTypes = ['offer', 'answer', 'candidate', 'PING', 'SIGNAL', 'ROUTE_TEST'];
+    const validTypes = ['offer', 'answer', 'candidate', 'PING', 'PONG', 'SIGNAL', 'ROUTE_TEST'];
     if (!validTypes.includes(data.signal?.type)) {
       _logDebug?.("Invalid signal type from", data.id.substring(0,8) + "...", data.signal);
       return;
@@ -145,12 +145,18 @@ export function initializeApi(dht, adapter, debug = false) {
       
       // For ICE candidates when trickle is enabled
       if (isICECandidate) {
-        // When trickle is disabled, we should still allow the server to handle candidates
-        // but log the unexpected behavior
-        if (isTrickleDisabled) {
-          _logDebug?.(`API: Using server for unexpected ICE candidate with trickle disabled for ${targetPeerId.substr(0, 8)}...`);
-        } else {
-          _logDebug?.(`API: Using server for ICE candidate signal to ${targetPeerId.substr(0, 8)}...`);
+        // Enhanced ICE candidate debugging
+        console.log(`[API Debug] Processing ICE candidate. Trickle disabled: ${isTrickleDisabled}, Target: ${targetPeerId.substr(0, 8)}...`);
+        console.log(`[API Debug] ICE candidate: ${JSON.stringify(data.signal).substring(0, 100)}...`);
+        
+        // ALWAYS use server for ICE candidates regardless of trickle setting
+        // This ensures reliable connection establishment
+        _logDebug?.(`API: Using server for ICE candidate signal to ${targetPeerId.substr(0, 8)}...`);
+        
+        // Make sure the candidate has the right format before sending
+        if (!data.signal.candidate && data.signal.candidate !== "") {
+          _logDebug?.(`API: Invalid ICE candidate format - missing candidate property`);
+          console.warn(`Invalid ICE candidate format:`, data.signal);
         }
         
         activeTransport.signal(targetPeerId, data.signal);
@@ -236,6 +242,27 @@ export function initializeApi(dht, adapter, debug = false) {
 
       // Fallback to server
       if (!signalSent) {
+        // Check for any WebRTC connection data in the signal
+        const hasWebRTCData = (
+          data.signal.candidate !== undefined || // ICE candidate property
+          data.signal.sdp !== undefined ||       // SDP offer/answer
+          data.signal.type === 'candidate' ||    // ICE candidate type
+          data.signal.type === 'offer' ||        // SDP offer
+          data.signal.type === 'answer'          // SDP answer
+        );
+
+        // Don't send ROUTE_TEST, PING, or PONG signals over the signaling server
+        // UNLESS they contain WebRTC connection data
+        if (data.signal.type === 'ROUTE_TEST' || data.signal.type === 'PING' || data.signal.type === 'PONG') {
+          if (!hasWebRTCData) {
+            _logDebug?.(`API: ${data.signal.type} signal to ${targetPeerId.substr(0, 8)}... NOT sent via server as it's a pure control signal`);
+            return; // Exit without sending only if no WebRTC data
+          }
+          
+          // Log that we're allowing this signal because it contains WebRTC data
+          _logDebug?.(`API: Allowing ${data.signal.type} signal to ${targetPeerId.substr(0, 8)}... because it contains WebRTC connection data`);
+        }
+
         _logDebug?.(`API: Falling back to server for signal to ${targetPeerId.substr(0, 8)}...`);
         activeTransport.signal(targetPeerId, data.signal);
         
