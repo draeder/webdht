@@ -76,19 +76,24 @@ wss.on('connection', (ws) => {
       else if (data.type === 'signal' && data.target && data.signal) {
         const targetWs = peers.get(data.target);
         if (targetWs && targetWs.readyState === 1) {
+          stats.messages.total++;
+          stats.messages.outbound++;
+          stats.successfulRelays++;
+          
+          const signalType = data.signal.type?.toLowerCase() || 'other';
+          stats.signals[signalType] = (stats.signals[signalType] || 0) + 1;
+          
           targetWs.send(JSON.stringify({
             type: 'signal',
             peerId: peerId,
             signal: data.signal
           }));
-          console.log('Signal forwarded from', peerId.substring(0, 8), 'to', data.target.substring(0, 8), 'Type:', data.signal.type || 'candidate');
-          if (data.signal.sdp) {
-            console.log('SDP snippet:', data.signal.sdp.substring(0, 120) + '...');
-          }
-          if (data.signal.candidate) {
-            console.log('ICE candidate:', data.signal.candidate.candidate.substring(0, 80) + '...');
-          }
+          
+          console.log(`Signal ${signalType.toUpperCase()} relayed ${peerId.substring(0, 8)}→${data.target.substring(0, 8)}`);
         } else {
+          stats.errors++;
+          stats.messages.total++;
+          stats.messages.inbound++;
           ws.send(JSON.stringify({
             type: 'error',
             message: 'Target peer not available'
@@ -111,3 +116,38 @@ wss.on('connection', (ws) => {
 server.listen(PORT, () => {
   console.log(`Signaling server running on port ${PORT}`);
 });
+
+const stats = {
+  messages: { total: 0, inbound: 0, outbound: 0 },
+  signals: { offer: 0, answer: 0, candidate: 0, other: 0 },
+  errors: 0,
+  successfulRelays: 0
+};
+
+// Periodic stats logging
+setInterval(() => {
+  const successRate = stats.successfulRelays > 0 
+    ? ((stats.successfulRelays / stats.messages.total) * 100).toFixed(1)
+    : 0;
+
+  const hasActivity = stats.messages.total > 0
+    || stats.signals.offer > 0
+    || stats.signals.answer > 0
+    || stats.signals.candidate > 0
+    || stats.signals.other > 0
+    || stats.errors > 0;
+
+  if (hasActivity) {
+    console.log(`[Stats] Messages: ${stats.messages.total} (IN: ${stats.messages.inbound}, OUT: ${stats.messages.outbound}) | ` +
+      `Signals: OFFER=${stats.signals.offer} ANSWER=${stats.signals.answer} CANDIDATE=${stats.signals.candidate} OTHER=${stats.signals.other} | ` +
+      `Success Rate: ${successRate}% | Errors: ${stats.errors}`);
+  }
+
+  // Reset counters
+  Object.assign(stats, {
+    messages: { total: 0, inbound: 0, outbound: 0 },
+    signals: { offer: 0, answer: 0, candidate: 0, other: 0 },
+    errors: 0,
+    successfulRelays: 0
+  });
+}, 30000);
