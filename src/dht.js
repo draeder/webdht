@@ -243,7 +243,6 @@ class DHT extends EventEmitter {
     this.processedCandidates = new Set();
 
     // Initialize Kademlia parameters with defaults or user-provided values
-    console.log("🥰", "DHT options", options)
     this.K = options.k || DEFAULT_K;
     this.ALPHA = options.alpha || DEFAULT_ALPHA;
     this.BUCKET_COUNT = options.bucketCount || DEFAULT_BUCKET_COUNT;
@@ -524,6 +523,9 @@ class DHT extends EventEmitter {
             // Route from A to B
             const peerAObj = this.peers.get(peerA);
             if (peerAObj && peerAObj.connected) {
+              // Log signal forwarding for debugging
+              this._logSignalForward(this.nodeIdHex, peerB, { type: "ROUTE_TEST" });
+              
               peerAObj.send({
                 type: "SIGNAL",
                 sender: this.nodeIdHex,
@@ -539,6 +541,9 @@ class DHT extends EventEmitter {
             // Route from B to A
             const peerBObj = this.peers.get(peerB);
             if (peerBObj && peerBObj.connected) {
+              // Log signal forwarding for debugging
+              this._logSignalForward(this.nodeIdHex, peerA, { type: "ROUTE_TEST" });
+              
               peerBObj.send({
                 type: "SIGNAL",
                 sender: this.nodeIdHex,
@@ -870,8 +875,8 @@ class DHT extends EventEmitter {
       if (isWebRTCSignal) {
         // Enhanced ICE candidate debugging
         if (data.type === 'candidate') {
-          console.log(`[DHT Debug] Processing ICE candidate in dht.js. PeerId: ${peerId.substr(0, 8)}...`);
-          console.log(`[DHT Debug] ICE candidate data: ${JSON.stringify(data).substring(0, 100)}...`);
+          this._logDebug(`[DHT Debug] Processing ICE candidate in dht.js. PeerId: ${peerId.substr(0, 8)}...`);
+          this._logDebug(`[DHT Debug] ICE candidate data: ${JSON.stringify(data).substring(0, 100)}...`);
           
           // Properly check if this is a valid ICE candidate with actual candidate data
           // Only deduplicate when we have a valid candidate string
@@ -1057,7 +1062,7 @@ class DHT extends EventEmitter {
 
     // Handle disconnect
     peer.on("close", (peerId) => {
-      // console.log(`Disconnected from peer: ${peerId}`);
+      this._logDebug(`Disconnected from peer: ${peerId}`);
       this.peers.delete(peerId);
       this.emit("peer:disconnect", peerId);
     });
@@ -1704,20 +1709,44 @@ class DHT extends EventEmitter {
       }
       
       // Emit the signal event with additional metadata to indicate if it was DHT-routed
-      // Use batching for the response if appropriate
-      if (this.SIGNAL_BATCH_INTERVAL > 0) {
-        this._batchSignal(originalSender, signal, isDhtRouted);
+      // BUT FILTER OUT DHT-internal signals (PING, ROUTE_TEST, SIGNAL) - these should NEVER be sent via websocket
+      if (signal.type === 'PING' || signal.type === 'ROUTE_TEST' || signal.type === 'SIGNAL') {
+        this._logDebug(`NOT forwarding DHT-internal signal of type ${signal.type} to application`);
+        // Handle DHT-specific signals internally without emitting to application
+        if (signal.type === 'PING') {
+          // Send PONG response directly through DHT if needed
+          if (this.peers.has(originalSender)) {
+            const peer = this.peers.get(originalSender);
+            if (peer && peer.connected) {
+              this._logDebug(`Sending PONG response directly to ${originalSender.substring(0, 8)}...`);
+              peer.send({
+                type: "PONG",
+                sender: this.nodeIdHex
+              });
+            }
+          }
+        }
+        // ROUTE_TEST signals are just to establish routes, no response needed
       } else {
-        this.emit("signal", {
-          id: originalSender,
-          signal: signal,
-          viaDht: isDhtRouted
-        });
+        // For WebRTC signaling and application messages, emit the signal event
+        // Use batching for the response if appropriate
+        if (this.SIGNAL_BATCH_INTERVAL > 0) {
+          this._batchSignal(originalSender, signal, isDhtRouted);
+        } else {
+          this.emit("signal", {
+            id: originalSender,
+            signal: signal,
+            viaDht: isDhtRouted
+          });
+        }
       }
     }
     // If the target is another peer, forward the signal
     else if (this.peers.has(targetId)) {
       this._logDebug(`Forwarding signal from ${originalSender.substring(0, 8)}... to ${targetId.substring(0, 8)}...`);
+      // Add debug log to track signal forwarding
+      this._logSignalForward(originalSender, targetId, signal);
+      
       const targetPeer = this.peers.get(targetId);
       if (targetPeer && targetPeer.connected) {
         // Compress the signal if enabled
@@ -1745,6 +1774,14 @@ class DHT extends EventEmitter {
     } else {
       this._logDebug(`TTL expired for signal from ${originalSender.substring(0, 8)}... to ${targetId.substring(0, 8)}...`);
     }
+  }
+  
+  /**
+   * Debug method to log signal forwarding
+   * @private
+   */
+  _logSignalForward(fromId, toId, signal) {
+    this._logDebug(`Signal forwarded from ${fromId.substring(0, 8)} to ${toId.substring(0, 8)} Type: ${signal.type}`);
   }
   
   /**

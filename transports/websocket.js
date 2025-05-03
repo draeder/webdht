@@ -324,6 +324,9 @@ class WebSocketTransport extends EventEmitter {
       return false;
     }
     
+    // DEBUG - Log all signals going through websocket transport
+    console.log(`WebSocket Transport Signal: To ${targetPeerId.substring(0, 8)} Type: ${signal.type}`);
+    
     // Enhanced signal validation before sending
     if (!signal) {
       this._logDebug("Cannot signal: signal data is null or undefined");

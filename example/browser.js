@@ -407,6 +407,16 @@ async function initApp() {
         console.error('Invalid peer ID in signal:', data);
         return;
       }
+      
+      // Log DHT signals for debugging
+      console.log(`SIGNAL: From ${data.id.substring(0, 8)} Type: ${data.signal.type} viaDht: ${data.viaDht}`);
+      
+      // BUGFIX: Don't send DHT-internal signals over websocket
+      // DHT-internal signals should only be routed through the DHT network
+      if (data.signal.type === 'PING' || data.signal.type === 'ROUTE_TEST' || data.signal.type === 'SIGNAL') {
+        console.log(`FILTERING: Not forwarding ${data.signal.type} signal to websocket server`);
+        return;
+      }
 
       const targetPeerId = data.id;
       const peerShortId = targetPeerId.substring(0, 8);
