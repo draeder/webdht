@@ -1057,6 +1057,9 @@ class DHT extends EventEmitter {
     peer.on("message", (message, peerId) => {
       if (message && message.type && this.messageHandlers[message.type]) {
         this.messageHandlers[message.type](message, peerId);
+      } else if (message && message.type) {
+        // Emit unhandled messages for applications to handle
+        this.emit("peer:message", { message, peerId });
       }
     });
 

@@ -8,6 +8,9 @@
 // Import WebDHT and the SHA1 functionality
 import WebDHT, { generateRandomId } from "/src/index.js";
 
+// Import the chess module
+import { ChessModule } from "./chess-module.js";
+
 // Import the consolidated API functions
 import {
   initializeApi,
@@ -24,6 +27,9 @@ import transportManager from "../transports/index.js";
 
 // Track connection attempts with metadata (peer ID, timestamps, retry counts, etc.)
 const connectionAttempts = new Map();
+
+// Global chess module instance
+let chessModule = null;
 
 // Signal timeout configuration
 const SIGNAL_TIMEOUT = 15000; // 15 seconds timeout for signal exchange
@@ -291,6 +297,15 @@ function setupTabs() {
       const content = document.getElementById(`${tabId}-content`);
       if (content) {
         content.classList.add("active");
+      }
+
+      // Handle chess module activation/deactivation
+      if (chessModule) {
+        if (tabId === "chess") {
+          chessModule.activate();
+        } else {
+          chessModule.deactivate();
+        }
       }
     });
   });
@@ -705,6 +720,13 @@ async function initApp() {
       browserUiAdapter.updateStatus(`DHT Global Error: ${err.message}`, true);
     });
 
+    // Initialize chess module after DHT is ready
+    dht.on('ready', () => {
+      console.log("Initializing Chess Module...");
+      chessModule = new ChessModule(dht);
+      window.chess = chessModule; // Make it globally accessible for HTML event handlers
+    });
+
     return dht;
   } catch (err) {
     console.error("Error initializing WebDHT:", err);
@@ -788,6 +810,34 @@ function connectToSignalingServerWithRetry(url) {
       document.dispatchEvent(new CustomEvent('api:new_peer', {
         detail: { peerId: peerId }
       }));
+    });
+
+    transport.on('peer_left', (peerId) => {
+      console.log(`Peer left: ${peerId.substring(0, 8)}...`);
+      browserUiAdapter.updateStatus(`Peer left: ${peerId.substring(0, 8)}...`);
+      
+      // Update the peer list with remaining registered peers
+      const allPeers = transport.getRegisteredPeers();
+      browserUiAdapter.updatePeerList(allPeers);
+      
+      // Clean up DHT connection if it exists
+      if (window.dhtInstance && window.dhtInstance.peers.has(peerId)) {
+        const peer = window.dhtInstance.peers.get(peerId);
+        if (peer && typeof peer.destroy === 'function') {
+          console.log(`Cleaning up DHT connection to left peer: ${peerId.substring(0, 8)}...`);
+          peer.destroy();
+        }
+        window.dhtInstance.peers.delete(peerId);
+        
+        // Update connected peers display
+        if (browserUiAdapter.updateConnectedPeers) {
+          const connectedPeerIds = Array.from(window.dhtInstance.peers.keys());
+          browserUiAdapter.updateConnectedPeers(connectedPeerIds);
+        }
+      }
+      
+      // Clean up connection attempts tracking
+      connectionAttempts.delete(peerId);
     });
 
     transport.on('signal', (peerId, signal) => {
@@ -1489,10 +1539,41 @@ window.initApp = async function () {
 
 // Properly clean up resources when window is closed or refreshed
 window.addEventListener('beforeunload', () => {
+  console.log("Page unloading - cleaning up DHT connections...");
+  
+  // Clean up DHT peer connections first
+  if (window.dhtInstance) {
+    try {
+      // Disconnect from all peers
+      for (const [peerId, peer] of window.dhtInstance.peers) {
+        console.log(`Disconnecting from peer: ${peerId.substring(0, 8)}...`);
+        if (peer && typeof peer.destroy === 'function') {
+          peer.destroy();
+        }
+      }
+      
+      // Clear peer maps
+      window.dhtInstance.peers.clear();
+      
+      // Emit disconnect events for cleanup
+      window.dhtInstance.emit('cleanup');
+    } catch (err) {
+      console.error("Error during DHT cleanup:", err);
+    }
+  }
+  
+  // Clean up WebSocket transport
   if (browserUiAdapter.webSocketTransport) {
     console.log("Cleaning up WebSocketTransport...");
-    browserUiAdapter.webSocketTransport.destroy();
+    try {
+      browserUiAdapter.webSocketTransport.destroy();
+    } catch (err) {
+      console.error("Error during transport cleanup:", err);
+    }
   }
+  
+  // Clear connection attempts tracking
+  connectionAttempts.clear();
 });
 
 // Auto-initialize the app when loaded

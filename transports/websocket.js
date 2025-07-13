@@ -277,6 +277,17 @@ class WebSocketTransport extends EventEmitter {
         this.emit("signal", message.peerId, message.signal);
         break;
         
+      case "peer_left":
+        // A peer left the network
+        this._logDebug(`Peer left: ${message.peerId}`);
+        
+        // Remove from registered peers
+        this.registeredPeers.delete(message.peerId);
+        
+        // Emit peer_left event for cleanup
+        this.emit("peer_left", message.peerId);
+        break;
+        
       case "error":
         // Server reported an error
         this._logDebug(`Server error: ${message.message}`);

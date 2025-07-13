@@ -151,6 +151,23 @@ wss.on('connection', (ws) => {
     if (peerId) {
       peers.delete(peerId);
       console.log(`Peer disconnected: ${peerId}`);
+      
+      // Notify all remaining peers about the disconnection
+      const disconnectionMessage = {
+        type: 'peer_left',
+        peerId: peerId
+      };
+      
+      for (const [remainingPeerId, remainingWs] of peers.entries()) {
+        if (remainingWs.readyState === 1) { // WebSocket.OPEN
+          try {
+            remainingWs.send(JSON.stringify(disconnectionMessage));
+            console.log(`Notified ${remainingPeerId.substring(0, 8)}... about ${peerId.substring(0, 8)}... leaving`);
+          } catch (err) {
+            console.error(`Failed to notify ${remainingPeerId} about peer leaving:`, err.message);
+          }
+        }
+      }
     }
   });
 });
@@ -193,6 +210,49 @@ setInterval(() => {
     successfulRelays: 0
   };
 }, 30000);
+
+// Route for serving the HTML
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
+
+// Route for serving the statistics page
+app.get("/stats", (req, res) => {
+  res.sendFile(path.join(__dirname, "stats.html"));
+});
+
+// API endpoint to get signaling statistics
+app.get("/api/stats", (req, res) => {
+  const apiStats = {
+    activePeers: peers.size,
+    totalPeers: peers.size, // In simple server, total = active
+    peerStats: {},
+    summary: {
+      totalBytes: 0, // Not tracked in simple server
+      totalSignals: stats.lifetime.signals.offer + stats.lifetime.signals.answer + stats.lifetime.signals.candidate + stats.lifetime.signals.other,
+      totalDhtSignals: 0, // Not tracked in simple server
+      totalServerSignals: stats.lifetime.successfulRelays,
+      averageBytes: 0,
+      averageSignals: peers.size > 0 ? Math.round((stats.lifetime.signals.offer + stats.lifetime.signals.answer + stats.lifetime.signals.candidate + stats.lifetime.signals.other) / peers.size) : 0,
+      averageDhtSignals: 0,
+      averageServerSignals: peers.size > 0 ? Math.round(stats.lifetime.successfulRelays / peers.size) : 0
+    }
+  };
+  
+  // Add basic peer stats (limited data available in simple server)
+  for (const peerId of peers.keys()) {
+    apiStats.peerStats[peerId] = {
+      active: true,
+      byteCount: 0, // Not tracked
+      signalCount: 0, // Not tracked per peer
+      dhtSignalCount: 0, // Not tracked
+      serverSignalCount: 0, // Not tracked per peer
+      connections: {}
+    };
+  }
+  
+  res.json(apiStats);
+});
 
 server.listen(PORT, () => {
   console.log(`Signaling server running on port ${PORT}`);

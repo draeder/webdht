@@ -23,6 +23,7 @@ app.use(express.json());
 // Serve static files
 app.use("/", express.static(path.join(__dirname)));
 app.use("/src", express.static(path.join(__dirname, "..", "src")));
+app.use("/transports", express.static(path.join(__dirname, "..", "transports")));
 
 // Create HTTP server
 const server = http.createServer(app);
@@ -37,6 +38,17 @@ const peers = new Map(); // id -> websocket
 const peerStats = new Map(); // id -> {
   // byteCount, signalCount, dhtSignalCount, serverSignalCount,
   // connections: { target -> { type: 'dht'|'server', ... } }
+
+// Helper to compute XOR distance between two hex IDs
+function calculateXORDistance(id1, id2) {
+  const buf1 = Buffer.from(id1, 'hex');
+  const buf2 = Buffer.from(id2, 'hex');
+  let distance = 0n;
+  for (let i = 0; i < buf1.length; i++) {
+    distance = (distance << 8n) | BigInt(buf1[i] ^ buf2[i]);
+  }
+  return distance;
+}
 
 // Handle WebSocket connections
 wss.on("connection", (ws) => {
@@ -66,19 +78,19 @@ wss.on("connection", (ws) => {
         console.log(`Registered: ${peerId}`);
         console.log(`Active peers: ${peers.size}`);
 
-        // Send current peer list
-        const peerList = [];
-        for (const id of peers.keys()) {
-          if (id !== peerId) {
-            peerList.push(id);
-          }
-        }
+        // Find up to 3 closest peers by XOR distance
+        const otherIds = Array.from(peers.keys()).filter(id => id !== peerId);
+        const closest = otherIds
+          .map(id => ({ id, distance: calculateXORDistance(peerId, id) }))
+          .sort((a, b) => (a.distance < b.distance ? -1 : 1))
+          .slice(0, 3)
+          .map(p => p.id);
 
         // Track bytes sent
         const responseData = {
           type: "registered",
           peerId: peerId,
-          peers: peerList,
+          peers: closest,
         };
         const responseStr = JSON.stringify(responseData);
         const bytesSent = Buffer.byteLength(responseStr);
@@ -89,13 +101,10 @@ wss.on("connection", (ws) => {
         
         ws.send(responseStr);
 
-        // Notify all existing peers about the new peer
-        for (const [existingPeerId, existingWs] of peers.entries()) {
-          // Don't notify the new peer about itself
-          if (existingPeerId !== peerId && existingWs.readyState === 1) {
-            // WebSocket.OPEN
-            console.log(`Notifying ${existingPeerId} about new peer ${peerId}`);
-            
+        // Notify those closest peers of the newcomer
+        closest.forEach(id => {
+          const peerWs = peers.get(id);
+          if (peerWs?.readyState === 1) {
             // Track bytes sent
             const notificationData = {
               type: "new_peer",
@@ -105,14 +114,15 @@ wss.on("connection", (ws) => {
             const bytesSent = Buffer.byteLength(notificationStr);
             
             // Update stats for the existing peer
-            const existingStats = peerStats.get(existingPeerId);
+            const existingStats = peerStats.get(id);
             if (existingStats) {
               existingStats.byteCount += bytesSent;
             }
             
-            existingWs.send(notificationStr);
+            peerWs.send(notificationStr);
+            console.log(`Notified ${id.substring(0,8)} of new peer ${peerId.substring(0,8)}`);
           }
-        }
+        });
 
         // Log all current peers
         console.log("Current peers:", Array.from(peers.keys()));
@@ -335,6 +345,23 @@ wss.on("connection", (ws) => {
         }
       }
       
+      // Notify all remaining peers about the disconnection
+      const disconnectionMessage = {
+        type: 'peer_left',
+        peerId: peerId
+      };
+      
+      for (const [remainingPeerId, remainingWs] of peers.entries()) {
+        if (remainingWs.readyState === 1) { // WebSocket.OPEN
+          try {
+            remainingWs.send(JSON.stringify(disconnectionMessage));
+            console.log(`Notified ${remainingPeerId.substring(0, 8)}... about ${peerId.substring(0, 8)}... leaving`);
+          } catch (err) {
+            console.error(`Failed to notify ${remainingPeerId} about peer leaving:`, err.message);
+          }
+        }
+      }
+      
       // Keep the stats for later analysis but remove from active peers
       peers.delete(peerId);
     }
@@ -391,6 +418,11 @@ app.get("/", (req, res) => {
 // Route for serving the statistics page
 app.get("/stats", (req, res) => {
   res.sendFile(path.join(__dirname, "stats.html"));
+});
+
+// Route for serving the chess game
+app.get("/chess", (req, res) => {
+  res.sendFile(path.join(__dirname, "game", "chess.html"));
 });
 
 // API endpoint to get signaling statistics
