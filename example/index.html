@@ -485,77 +485,52 @@
         min-height: 60px;
       }
 
-      .no-games {
-        color: #586069;
-        font-style: italic;
-        text-align: center;
-        padding: 20px;
-      }
-
-      .chess-game-log {
-        margin-top: 20px;
-      }
-
-      .chess-game-log h4 {
-        margin-bottom: 10px;
-        color: #24292e;
-        font-weight: 600;
-      }
-
-      .chess-move-history {
+      .game-item {
+        padding: 10px;
         background: #f6f8fa;
-        padding: 12px;
         border-radius: 6px;
+        margin-bottom: 8px;
         border: 1px solid #eaecef;
-        max-height: 200px;
-        overflow-y: auto;
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-        font-size: 13px;
-        line-height: 1.6;
       }
 
-      .chess-move {
-        display: inline-block;
-        margin-right: 15px;
-        margin-bottom: 5px;
+      .game-item.active-game {
+        background: #e6ffea;
+        border: 2px solid #28a745;
       }
 
-      .chess-move-pair {
-        margin-bottom: 4px;
+      .game-item .game-info {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
       }
 
-      .chess-move-number {
+      .game-item .game-players {
+        display: flex;
+        align-items: center;
+        gap: 8px;
         font-weight: 600;
-        color: #0366d6;
-        display: inline-block;
-        min-width: 24px;
+        font-size: 14px;
       }
 
-      .chess-white-move, .chess-black-move {
-        display: inline-block;
-        margin-right: 8px;
-        min-width: 50px;
+      .game-item .player {
+        display: flex;
+        align-items: center;
+        gap: 4px;
       }
 
-      .chess-white-move {
-        color: #24292e;
+      .game-item .vs {
+        color: #586069;
+        font-size: 12px;
       }
 
-      .chess-black-move {
+      .game-item .game-status {
+        font-size: 12px;
         color: #586069;
       }
 
-      @media (max-width: 768px) {
-        .chess-board {
-          grid-template-columns: repeat(8, 45px);
-          grid-template-rows: repeat(8, 45px);
-        }
-        
-        .chess-square {
-          width: 45px;
-          height: 45px;
-          font-size: 28px;
-        }
+      .game-item .game-id {
+        font-size: 10px;
+        color: #959da5;
       }
 
       /* Modal Styles */

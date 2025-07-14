@@ -149,6 +149,41 @@
         </div>
     </div>
 
+    <!-- Draw Offer Modal -->
+    <div id="drawOfferModal" class="modal hidden">
+        <div class="modal-content">
+            <h3>Draw Offer</h3>
+            <p>Your opponent offers a draw. Do you accept?</p>
+            <div class="modal-actions">
+                <button id="acceptDrawBtn" class="primary-btn">Accept Draw</button>
+                <button id="declineDrawBtn" class="secondary-btn">Decline</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Rematch Offer Modal -->
+    <div id="rematchOfferModal" class="modal hidden">
+        <div class="modal-content">
+            <h3>Rematch Offer</h3>
+            <p>Your opponent wants a rematch. Do you accept?</p>
+            <div class="modal-actions">
+                <button id="acceptRematchBtn" class="primary-btn">Accept Rematch</button>
+                <button id="declineRematchBtn" class="secondary-btn">Decline</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- General Alert Modal -->
+    <div id="alertModal" class="modal hidden">
+        <div class="modal-content">
+            <h3 id="alertTitle">Notice</h3>
+            <p id="alertMessage"></p>
+            <div class="modal-actions">
+                <button id="alertOkBtn" class="primary-btn">OK</button>
+            </div>
+        </div>
+    </div>
+
     <script type="module" src="game/chess.js"></script>
 </body>
 </html>

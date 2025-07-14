@@ -90,6 +90,11 @@ export class ChessModule {
             opponentId: null,
             gameId: null
         };
+        
+        // Logging spam prevention
+        this.hasLoggedGetKeysError = false;
+        this.hasLoggedNoGetKeys = false;
+        this.lastOpponentConnectedState = null;
 
         // Check if chess tab is currently active
         this.checkInitialTabState();
@@ -149,6 +154,7 @@ export class ChessModule {
         }
         
         this.updateGameState();
+        this.updateConnectionState();
         this.uiInitialized = true;
         
         // Set up event listeners after UI elements are cached
@@ -249,6 +255,38 @@ export class ChessModule {
         if (this.ui && this.ui.cancelSearchBtn) {
             this.ui.cancelSearchBtn.disabled = !this.isSearching;
         }
+        
+        // Update search status display
+        if (this.ui && this.ui.searchStatus) {
+            if (this.gameState === 'playing') {
+                // Hide search status when game is active
+                this.ui.searchStatus.style.display = 'none';
+            } else if (this.isSearching) {
+                // Show "Searching for opponents..." when actively searching
+                this.ui.searchStatus.style.display = 'block';
+                this.ui.searchStatus.textContent = 'Searching for opponents...';
+            } else {
+                // Hide search status when not searching
+                this.ui.searchStatus.style.display = 'none';
+            }
+        }
+        
+        // Update games list to show active game
+        if (this.ui && this.ui.gamesList) {
+            if (this.gameState === 'playing' && this.gameId && this.opponentId) {
+                // Show active game
+                this.ui.gamesList.innerHTML = `
+                    <div class="active-game">
+                        <strong>Active Game:</strong> ${this.gameId.substring(0, 16)}...<br>
+                        <strong>Opponent:</strong> ${this.opponentId.substring(0, 8)}<br>
+                        <strong>Your Color:</strong> ${this.playerColor === 'white' ? 'White' : 'Black'}
+                    </div>
+                `;
+            } else {
+                // Show no active games
+                this.ui.gamesList.innerHTML = '<p>No active games</p>';
+            }
+        }
     }
 
     createBoard() {
@@ -340,15 +378,15 @@ export class ChessModule {
             // Highlight last move
             if (this.engine.lastMove) {
                 const { fromRow, fromCol, toRow, toCol } = this.engine.lastMove;
-                if ((boardRow === fromRow && boardCol === fromCol) || (boardRow === toRow && boardCol === fromCol)) {
+                if ((boardRow === fromRow && boardCol === fromCol) || (boardRow === toRow && boardCol === toCol)) {
                     square.classList.add('last-move');
                 }
             }
             
             // Highlight king in check
             if (this.engine.gameState === GAME_STATES.CHECK) {
-                const kingPos = this.engine.findKing(this.engine.currentPlayer);
-                if (kingPos && boardRow === kingPos.row && boardCol === kingPos.col) {
+                const kingPos = this.engine.kingPositions[this.engine.currentPlayer];
+                if (kingPos && boardRow === kingPos[0] && boardCol === kingPos[1]) {
                     square.classList.add('in-check');
                 }
             }
@@ -420,14 +458,11 @@ export class ChessModule {
                 console.error('Chess: Error sending move via gossip:', err);
             });
             
-            // Also store the move in DHT for persistence
-            this.storeMoveInDHT(result.move);
-            
             this.updateMoveHistory();
             this.updateGameState();
             this.updateBoard();
             
-            // Update game state in DHT
+            // Store complete game state in DHT (includes full move history)
             this.storeGameState();
             
             // Check for game end
@@ -440,26 +475,6 @@ export class ChessModule {
             }
         } else {
             console.log('Chess: Move failed - invalid move. Result:', result);
-        }
-    }
-
-    async storeMoveInDHT(move) {
-        if (!this.gameId) return;
-        
-        const moveKey = `${this.gameId}_move_${Date.now()}`;
-        const moveData = {
-            gameId: this.gameId,
-            move: move,
-            playerId: this.dht.nodeId,
-            timestamp: Date.now()
-        };
-
-        try {
-            console.log('Chess: Storing move in DHT with key:', moveKey);
-            await this.dht.put(moveKey, JSON.stringify(moveData));
-            console.log('Chess: Move stored successfully');
-        } catch (err) {
-            console.error('Chess: Error storing move:', err);
         }
     }
 
@@ -868,6 +883,12 @@ export class ChessModule {
             return;
         }
 
+        // Reset state if it's 'ended' to allow new search
+        if (this.gameState === 'ended') {
+            console.log('Chess: Resetting ended game state to allow new search');
+            this.gameState = 'disconnected';
+        }
+
         console.log('Chess: Starting simple DHT matchmaking');
         this.isSearching = true;
         this.gameState = 'searching';
@@ -987,8 +1008,50 @@ export class ChessModule {
     }
 
     async checkForNewMoves() {
-        // Fallback method to check DHT for moves when gossip is unavailable
-        console.log('Chess: Checking DHT for new moves (fallback)');
+        // Fallback method to check DHT for game state updates when gossip is unavailable
+        // Only log if opponent is not connected
+        if (!this.isOpponentConnected()) {
+            console.log('Chess: Checking DHT for game state updates (fallback)');
+        }
+        
+        // Check for updated game state in DHT
+        if (this.gameId) {
+            try {
+                const gameStateData = await this.dht.get(this.gameId);
+                if (gameStateData) {
+                    const gameState = JSON.parse(gameStateData);
+                    
+                    // Check if the game state has more moves than we currently have
+                    if (gameState.moveHistory && gameState.moveHistory.length > this.engine.moveHistory.length) {
+                        console.log('Chess: Found updated game state in DHT with', gameState.moveHistory.length, 'moves vs our', this.engine.moveHistory.length);
+                        
+                        // Synchronize the entire game state from DHT
+                        // This is safer than trying to apply individual moves
+                        if (gameState.board && gameState.currentPlayer) {
+                            console.log('Chess: Synchronizing complete game state from DHT');
+                            
+                            // Update engine state
+                            this.engine.board = gameState.board;
+                            this.engine.currentPlayer = gameState.currentPlayer;
+                            this.engine.moveHistory = gameState.moveHistory || [];
+                            this.engine.gameState = gameState.gameState || 'playing';
+                            
+                            // Update UI
+                            this.updateMoveHistory();
+                            this.updateGameState();
+                            this.updateBoard();
+                            this.switchPlayerTimer();
+                            
+                            console.log('Chess: Game state synchronized from DHT successfully');
+                        } else {
+                            console.warn('Chess: DHT game state missing required fields, skipping sync');
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error('Chess: Error checking game state in DHT:', err);
+            }
+        }
         
         // Also check for stored gossip messages
         await this.checkForStoredGossipMessages();
@@ -996,7 +1059,10 @@ export class ChessModule {
 
     async checkForGameActions() {
         // Fallback method to check DHT for game actions when gossip is unavailable
-        console.log('Chess: Checking DHT for game actions (fallback)');
+        // Only log if opponent is not connected
+        if (!this.isOpponentConnected()) {
+            console.log('Chess: Checking DHT for game actions (fallback)');
+        }
     }
     
     async checkForStoredGossipMessages() {
@@ -1006,7 +1072,10 @@ export class ChessModule {
 
         try {
             // Look for messages stored for us in DHT
-            console.log('Chess: Checking DHT for stored gossip messages...');
+            // Only log if opponent is not connected (to reduce spam)
+            if (!this.isOpponentConnected()) {
+                console.log('Chess: Checking DHT for stored gossip messages...');
+            }
             
             // Get all keys that might contain messages for us
             const messagePrefix = `gossip_${this.dht.nodeId}`;
@@ -1018,13 +1087,20 @@ export class ChessModule {
                 try {
                     keys = await this.dht.getKeys();
                 } catch (err) {
-                    console.log('Chess: getKeys method failed, will skip stored message check:', err);
+                    // Only log first time to avoid spam
+                    if (!this.hasLoggedGetKeysError) {
+                        console.log('Chess: getKeys method failed, will skip stored message check:', err);
+                        this.hasLoggedGetKeysError = true;
+                    }
                     return;
                 }
             } else {
                 // If no getKeys method, we can't efficiently check for stored messages
                 // This is a limitation of the current DHT implementation
-                console.log('Chess: DHT does not support getKeys, skipping stored message check');
+                if (!this.hasLoggedNoGetKeys) {
+                    console.log('Chess: DHT does not support getKeys, skipping stored message check');
+                    this.hasLoggedNoGetKeys = true;
+                }
                 return;
             }
             
@@ -1098,6 +1174,18 @@ export class ChessModule {
         return peerExists;
     }
 
+    /**
+     * Check if opponent is currently connected via gossip
+     */
+    isOpponentConnected() {
+        if (!this.opponentId || !this.dht || !this.dht.peers) {
+            return false;
+        }
+        
+        const opponent = this.dht.peers.get(this.opponentId);
+        return opponent && opponent.connected;
+    }
+
     // Tab activation/deactivation methods
 
     activate() {
@@ -1138,15 +1226,21 @@ export class ChessModule {
         // Start polling for opponent moves as fallback to gossip
         this.movePollingInterval = setInterval(async () => {
             if (this.gameState === 'playing') {
-                // Monitor peer connectivity
+                // Monitor peer connectivity (only logs changes now)
                 this.monitorPeerConnectivity();
                 
-                await this.checkForNewMoves();
-                await this.checkForGameActions();
+                // If opponent is connected, we don't need to poll as frequently for DHT fallback
+                const isConnected = this.isOpponentConnected();
+                
+                // Only check DHT fallback if opponent is not connected or occasionally when connected
+                if (!isConnected || Math.random() < 0.1) { // 10% chance when connected
+                    await this.checkForNewMoves();
+                    await this.checkForGameActions();
+                }
             }
-        }, 2000); // Poll every 2 seconds for better responsiveness
+        }, 3000); // 3 seconds interval - reduced from 2 seconds
         
-        console.log('Chess: Move polling started with 2-second interval');
+        console.log('Chess: Move polling started with 3-second interval');
     }
 
     startSimpleMatchmakingPolling() {
@@ -1440,6 +1534,9 @@ export class ChessModule {
         // Update connection state
         this.updateConnectionState();
         
+        // Store initial game state in DHT
+        this.storeGameState();
+        
         console.log('Chess: Game setup complete. Game state:', this.gameState, 'Player color:', this.playerColor);
     }
 
@@ -1485,6 +1582,11 @@ export class ChessModule {
         // Clear processed gossip moves
         this.processedGossipMoves.clear();
         
+        // Reset logging flags for next game
+        this.hasLoggedGetKeysError = false;
+        this.hasLoggedNoGetKeys = false;
+        this.lastOpponentConnectedState = null;
+        
         console.log('Chess: Cleaned up game state. Previous game:', oldGameId, 'Previous opponent:', oldOpponentId?.substring(0, 8));
         
         // Update UI if available
@@ -1507,6 +1609,17 @@ export class ChessModule {
                 this.ui.drawBtn.disabled = true;
             }
         }
+        
+        // Update connection state to reflect that game has ended
+        this.updateConnectionState();
+        
+        // Reset state back to disconnected after a brief delay to allow UI updates
+        setTimeout(() => {
+            if (this.gameState === 'ended') {
+                this.gameState = 'disconnected';
+                console.log('Chess: State reset to disconnected after game end');
+            }
+        }, 1000);
         
         // Could also show a modal or notification here
         alert(message);
@@ -1743,13 +1856,56 @@ export class ChessModule {
         if (!move) return '';
         
         try {
+            // Temporary debug logging to fix NaN issue
+            if (move && (isNaN(move.fromRow) || isNaN(move.fromCol) || isNaN(move.toRow) || isNaN(move.toCol))) {
+                console.log('Chess: DEBUG - Move object structure:', move);
+                console.log('Chess: DEBUG - Move coordinates:', {
+                    fromRow: move.fromRow,
+                    fromCol: move.fromCol,
+                    toRow: move.toRow,
+                    toCol: move.toCol,
+                    from: move.from,
+                    to: move.to
+                });
+            }
+            
             // Handle castling moves
             if (move.castling) {
                 return move.castling === 'kingside' ? 'O-O' : 'O-O-O';
             }
             
+            // Get coordinates - handle different possible formats
+            let fromRow, fromCol, toRow, toCol;
+            
+            if (typeof move.fromRow !== 'undefined' && typeof move.fromCol !== 'undefined' &&
+                typeof move.toRow !== 'undefined' && typeof move.toCol !== 'undefined') {
+                // Direct properties
+                fromRow = move.fromRow;
+                fromCol = move.fromCol;
+                toRow = move.toRow;
+                toCol = move.toCol;
+            } else if (move.from && move.to) {
+                // Array format
+                if (Array.isArray(move.from) && Array.isArray(move.to)) {
+                    [fromRow, fromCol] = move.from;
+                    [toRow, toCol] = move.to;
+                } else if (typeof move.from === 'object' && typeof move.to === 'object') {
+                    // Object format
+                    fromRow = move.from.row || move.from.r || move.from[0];
+                    fromCol = move.from.col || move.from.c || move.from[1];
+                    toRow = move.to.row || move.to.r || move.to[0];
+                    toCol = move.to.col || move.to.c || move.to[1];
+                }
+            }
+            
+            // Validate coordinates
+            if (isNaN(fromRow) || isNaN(fromCol) || isNaN(toRow) || isNaN(toCol)) {
+                console.error('Chess: Invalid coordinates in move:', { fromRow, fromCol, toRow, toCol, move });
+                return `Move-${Date.now()}`; // Fallback to timestamp
+            }
+            
             // Get piece type (empty for pawns)
-            const pieceType = move.piece?.type;
+            const pieceType = move.piece?.type || move.pieceType;
             let notation = '';
             
             // Add piece symbol (except for pawns)
@@ -1765,19 +1921,19 @@ export class ChessModule {
             }
             
             // Handle pawn captures
-            if (pieceType === 'pawn' && move.captured) {
+            if (pieceType === 'pawn' && (move.captured || move.isCapture)) {
                 // Add file of departure for pawn captures
-                notation += String.fromCharCode(97 + move.fromCol); // 'a' + column
+                notation += String.fromCharCode(97 + fromCol); // 'a' + column
             }
             
             // Add capture symbol
-            if (move.captured) {
+            if (move.captured || move.isCapture) {
                 notation += 'x';
             }
             
             // Add destination square
-            const fileChar = String.fromCharCode(97 + move.toCol); // 'a' + column
-            const rankChar = String(8 - move.toRow); // Convert row to rank
+            const fileChar = String.fromCharCode(97 + toCol); // 'a' + column
+            const rankChar = String(8 - toRow); // Convert row to rank
             notation += fileChar + rankChar;
             
             // Handle pawn promotion
@@ -1802,12 +1958,15 @@ export class ChessModule {
             
         } catch (err) {
             console.error('Chess: Error generating move notation:', err, move);
-            // Fallback to simple coordinate notation
-            const fromFile = String.fromCharCode(97 + move.fromCol);
-            const fromRank = String(8 - move.fromRow);
-            const toFile = String.fromCharCode(97 + move.toCol);
-            const toRank = String(8 - move.toRow);
-            return `${fromFile}${fromRank}-${toFile}${toRank}`;
+            // Fallback to simple coordinate notation if we have valid coordinates
+            if (!isNaN(move.fromRow) && !isNaN(move.fromCol) && !isNaN(move.toRow) && !isNaN(move.toCol)) {
+                const fromFile = String.fromCharCode(97 + move.fromCol);
+                const fromRank = String(8 - move.fromRow);
+                const toFile = String.fromCharCode(97 + move.toCol);
+                const toRank = String(8 - move.toRow);
+                return `${fromFile}${fromRank}-${toFile}${toRank}`;
+            }
+            return `Move-${Date.now()}`; // Ultimate fallback
         }
     }
 
@@ -1901,23 +2060,28 @@ export class ChessModule {
      */
     monitorPeerConnectivity() {
         if (!this.opponentId || !this.dht || !this.dht.peers) {
-            console.log('Chess: Peer connectivity check - no opponent or DHT peers available');
             return;
         }
         
         const opponent = this.dht.peers.get(this.opponentId);
         const opponentShortId = this.opponentId.substring(0, 8);
         
-        if (opponent) {
-            console.log(`Chess: Opponent ${opponentShortId} peer status:`, {
-                connected: opponent.connected,
-                readyState: opponent.readyState,
-                lastSeen: opponent.lastSeen || 'unknown'
-            });
-        } else {
-            console.log(`Chess: Opponent ${opponentShortId} not found in peer list`);
-            console.log('Chess: Available peers:', this.dht.peers.size, 
-                Array.from(this.dht.peers.keys()).map(id => id.substring(0, 8)));
+        // Only log connectivity changes, not every check
+        const isConnected = opponent?.connected || false;
+        if (this.lastOpponentConnectedState !== isConnected) {
+            this.lastOpponentConnectedState = isConnected;
+            
+            if (opponent) {
+                console.log(`Chess: Opponent ${opponentShortId} peer status changed:`, {
+                    connected: opponent.connected,
+                    readyState: opponent.readyState,
+                    lastSeen: opponent.lastSeen || 'unknown'
+                });
+            } else {
+                console.log(`Chess: Opponent ${opponentShortId} not found in peer list`);
+                console.log('Chess: Available peers:', this.dht.peers.size, 
+                    Array.from(this.dht.peers.keys()).map(id => id.substring(0,  8)));
+            }
         }
     }
 }

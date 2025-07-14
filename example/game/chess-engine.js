@@ -59,6 +59,7 @@ export class ChessEngine {
         this.currentPlayer = COLORS.WHITE;
         this.gameState = GAME_STATES.WAITING;
         this.moveHistory = [];
+        this.lastMove = null;
         this.capturedPieces = { [COLORS.WHITE]: [], [COLORS.BLACK]: [] };
         this.kingPositions = { [COLORS.WHITE]: [7, 4], [COLORS.BLACK]: [0, 4] };
         this.castlingRights = {
@@ -504,6 +505,14 @@ export class ChessEngine {
 
         // Add to move history
         this.moveHistory.push(move);
+        
+        // Set last move for UI highlighting
+        this.lastMove = {
+            fromRow: fromRow,
+            fromCol: fromCol,
+            toRow: toRow,
+            toCol: toCol
+        };
 
         return { success: true, move, gameState: this.gameState };
     }
@@ -592,13 +601,27 @@ export class ChessEngine {
     getAlgebraicNotation(move) {
         const { from, to, piece, captured, castling, promotion, check, checkmate } = move;
         
+        // Validate move object
+        if (!move || !from || !to || !Array.isArray(from) || !Array.isArray(to)) {
+            throw new Error('Invalid move object for notation');
+        }
+        
+        if (from.length !== 2 || to.length !== 2) {
+            throw new Error('Invalid move coordinates');
+        }
+        
+        if (typeof from[0] !== 'number' || typeof from[1] !== 'number' || 
+            typeof to[0] !== 'number' || typeof to[1] !== 'number') {
+            throw new Error('Move coordinates must be numbers');
+        }
+        
         if (castling) {
             return castling === 'kingside' ? 'O-O' : 'O-O-O';
         }
 
         let notation = '';
         
-        if (piece !== PIECES.PAWN) {
+        if (piece && piece !== PIECES.PAWN) {
             notation += piece.toUpperCase();
         }
 

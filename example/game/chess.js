@@ -46,6 +46,8 @@ class ChessGame {
         this.timeLeft = { white: GAME_CONFIG.TIME_CONTROL, black: GAME_CONFIG.TIME_CONTROL };
         this.gameTimer = null;
         this.lastMoveTime = null;
+        this.pendingDrawOffer = null;
+        this.pendingRematchOffer = null;
 
         this.initializeUI();
         this.setupEventListeners();
@@ -129,7 +131,19 @@ class ChessGame {
             gameEndTitle: document.getElementById('gameEndTitle'),
             gameEndMessage: document.getElementById('gameEndMessage'),
             newGameBtn: document.getElementById('newGameBtn'),
-            closeGameBtn: document.getElementById('closeGameBtn')
+            closeGameBtn: document.getElementById('closeGameBtn'),
+            
+            // New modals for draw and rematch
+            drawOfferModal: document.getElementById('drawOfferModal'),
+            acceptDrawBtn: document.getElementById('acceptDrawBtn'),
+            declineDrawBtn: document.getElementById('declineDrawBtn'),
+            rematchOfferModal: document.getElementById('rematchOfferModal'),
+            acceptRematchBtn: document.getElementById('acceptRematchBtn'),
+            declineRematchBtn: document.getElementById('declineRematchBtn'),
+            alertModal: document.getElementById('alertModal'),
+            alertTitle: document.getElementById('alertTitle'),
+            alertMessage: document.getElementById('alertMessage'),
+            alertOkBtn: document.getElementById('alertOkBtn')
         };
 
         this.createChessBoard();
@@ -167,6 +181,13 @@ class ChessGame {
         this.ui.declineInviteBtn.addEventListener('click', () => this.declineInvite());
         this.ui.newGameBtn.addEventListener('click', () => this.findGame());
         this.ui.closeGameBtn.addEventListener('click', () => this.closeGameEndModal());
+        
+        // New modal events
+        this.ui.acceptDrawBtn.addEventListener('click', () => this.acceptDraw());
+        this.ui.declineDrawBtn.addEventListener('click', () => this.declineDraw());
+        this.ui.acceptRematchBtn.addEventListener('click', () => this.acceptRematch());
+        this.ui.declineRematchBtn.addEventListener('click', () => this.declineRematch());
+        this.ui.alertOkBtn.addEventListener('click', () => this.closeAlert());
 
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
@@ -288,6 +309,11 @@ class ChessGame {
     }
 
     cancelSearch() {
+        console.log('cancelSearch called, current state:', {
+            isSearching: this.isSearching,
+            searchStatusHidden: this.ui.searchStatus.classList.contains('hidden')
+        });
+        
         this.isSearching = false;
         this.ui.findGameBtn.disabled = false;
         this.ui.cancelSearchBtn.disabled = true;
@@ -298,6 +324,11 @@ class ChessGame {
         if (this.dht) {
             this.dht.put(GAME_CONFIG.MATCHMAKING_KEY, '').catch(console.error);
         }
+        
+        console.log('cancelSearch complete:', {
+            isSearching: this.isSearching,
+            searchStatusHidden: this.ui.searchStatus.classList.contains('hidden')
+        });
         
         this.log('Cancelled game search');
     }
@@ -385,7 +416,7 @@ class ChessGame {
         
         this.ui.inviteModal.classList.add('hidden');
         this.currentInvite = null;
-        this.cancelSearch();
+        // cancelSearch is already called in startGame, no need to call it again
     }
 
     declineInvite() {
@@ -405,7 +436,7 @@ class ChessGame {
     handleGameAccept(peerId, data) {
         // Start game as white player
         this.startGame(data.gameId, peerId, COLORS.WHITE);
-        this.cancelSearch();
+        // cancelSearch is already called in startGame, no need to call it again
     }
 
     handleGameDecline(peerId, data) {
@@ -414,12 +445,23 @@ class ChessGame {
     }
 
     startGame(gameId, opponentId, playerColor) {
+        console.log('startGame called:', { gameId, opponentId, playerColor });
+        
+        // STOP ANY ACTIVE SEARCH FIRST
+        this.cancelSearch();
+        
         this.gameId = gameId;
         this.opponentId = opponentId;
         this.playerColor = playerColor;
         this.gameState = 'playing';
         this.engine.reset();
         this.engine.startGame();
+        
+        console.log('Game state after setup:', {
+            gameState: this.gameState,
+            isSearching: this.isSearching,
+            searchStatusHidden: this.ui.searchStatus.classList.contains('hidden')
+        });
         
         // Reset timers
         this.timeLeft = { 
@@ -444,6 +486,49 @@ class ChessGame {
         });
 
         this.updateBoard();
+        this.updateGamesList();
+        this.updateUI(); // This should hide search status
+        
+        // BRUTAL FIX - COMPLETELY DESTROY ALL SEARCH UI
+        setTimeout(() => {
+            // Hide the main search status container
+            this.ui.searchStatus.classList.add('hidden');
+            this.ui.searchStatus.style.display = 'none';
+            this.ui.searchStatus.style.visibility = 'hidden';
+            
+            // Find and hide the specific span with "Searching for opponents..."
+            const searchSpan = this.ui.searchStatus.querySelector('span');
+            if (searchSpan) {
+                searchSpan.style.display = 'none';
+                searchSpan.textContent = '';
+            }
+            
+            // Disable buttons
+            this.ui.cancelSearchBtn.disabled = true;
+            this.ui.findGameBtn.disabled = true;
+            
+            // Nuclear option - find and hide ALL elements containing search text
+            document.querySelectorAll('*').forEach(el => {
+                if (el.textContent && (
+                    el.textContent.includes('Searching for opponents') ||
+                    el.textContent.includes('Searching for')
+                )) {
+                    el.style.display = 'none';
+                    el.style.visibility = 'hidden';
+                    el.textContent = '';
+                }
+            });
+            
+            console.log('BRUTAL search status hiding complete');
+        }, 50);
+        
+        console.log('After updateUI:', {
+            searchStatusHidden: this.ui.searchStatus.classList.contains('hidden'),
+            gameState: this.gameState,
+            gameId: this.gameId,
+            opponentId: this.opponentId
+        });
+        
         this.log(`Game started! You are playing as ${playerColor}`);
     }
 
@@ -651,9 +736,86 @@ class ChessGame {
     }
 
     updateMoveHistory(move) {
+        console.log('updateMoveHistory called with move:', move);
+        
         const moveEntry = document.createElement('div');
         moveEntry.className = 'move-entry';
-        moveEntry.textContent = `${this.engine.fullmoveNumber}. ${this.engine.getAlgebraicNotation(move)}`;
+        
+        // Calculate move number properly: increment after black's move
+        const moveNumber = Math.floor((this.engine.moveHistory.length + 1) / 2);
+        const isWhiteMove = this.engine.moveHistory.length % 2 === 0;
+        
+        console.log('Move calculation:', {
+            moveHistoryLength: this.engine.moveHistory.length,
+            moveNumber: moveNumber,
+            isWhiteMove: isWhiteMove
+        });
+        
+        // ULTRA BULLETPROOF NOTATION - Multiple fallbacks
+        let notation = 'move'; // Ultimate fallback
+        
+        try {
+            if (move && move.from && move.to && Array.isArray(move.from) && Array.isArray(move.to) 
+                && move.from.length === 2 && move.to.length === 2) {
+                
+                const fromCol = move.from[1];
+                const fromRow = move.from[0];
+                const toCol = move.to[1];
+                const toRow = move.to[0];
+                
+                // Validate coordinates are numbers
+                if (typeof fromCol === 'number' && typeof fromRow === 'number' 
+                    && typeof toCol === 'number' && typeof toRow === 'number'
+                    && fromCol >= 0 && fromCol <= 7 && fromRow >= 0 && fromRow <= 7
+                    && toCol >= 0 && toCol <= 7 && toRow >= 0 && toRow <= 7) {
+                    
+                    const toFile = String.fromCharCode(97 + toCol); // a-h
+                    const toRank = 8 - toRow; // 1-8
+                    
+                    // Simple notation based on piece type
+                    if (move.piece === 'p' || !move.piece) {
+                        // Pawn move
+                        if (move.captured) {
+                            const fromFile = String.fromCharCode(97 + fromCol);
+                            notation = `${fromFile}x${toFile}${toRank}`;
+                        } else {
+                            notation = `${toFile}${toRank}`;
+                        }
+                    } else {
+                        // Piece move
+                        const pieceSymbol = move.piece.toUpperCase();
+                        if (move.captured) {
+                            notation = `${pieceSymbol}x${toFile}${toRank}`;
+                        } else {
+                            notation = `${pieceSymbol}${toFile}${toRank}`;
+                        }
+                    }
+                    
+                    console.log('Successfully created notation:', notation);
+                } else {
+                    console.error('Invalid move coordinates:', { fromCol, fromRow, toCol, toRow });
+                    notation = 'invalid';
+                }
+            } else {
+                console.error('Invalid move structure:', move);
+                notation = 'error';
+            }
+        } catch (error) {
+            console.error('Exception in notation creation:', error);
+            notation = 'exception';
+        }
+        
+        // Final safety check
+        if (!notation || notation.includes('NaN') || notation.includes('undefined')) {
+            notation = `move${this.engine.moveHistory.length + 1}`;
+        }
+        
+        if (isWhiteMove) {
+            moveEntry.textContent = `${moveNumber}. ${notation}`;
+        } else {
+            moveEntry.textContent = `${moveNumber}... ${notation}`;
+        }
+        
         this.ui.moveHistory.appendChild(moveEntry);
         this.ui.moveHistory.scrollTop = this.ui.moveHistory.scrollHeight;
     }
@@ -688,19 +850,8 @@ class ChessGame {
 
     handleDrawOffer(peerId, data) {
         if (peerId === this.opponentId) {
-            const accept = confirm('Your opponent offers a draw. Accept?');
-            if (accept) {
-                this.dht.sendMessage(this.opponentId, {
-                    type: MESSAGE_TYPES.DRAW_ACCEPT,
-                    gameId: this.gameId
-                });
-                this.endGame('Draw accepted!');
-            } else {
-                this.dht.sendMessage(this.opponentId, {
-                    type: MESSAGE_TYPES.DRAW_DECLINE,
-                    gameId: this.gameId
-                });
-            }
+            this.pendingDrawOffer = { peerId, data };
+            this.showDrawOffer();
         }
     }
 
@@ -723,11 +874,8 @@ class ChessGame {
 
     handleRematchOffer(peerId, data) {
         if (peerId === this.opponentId) {
-            const accept = confirm('Your opponent offers a rematch. Accept?');
-            if (accept) {
-                const newColor = this.playerColor === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE;
-                this.startGame(data.gameId, peerId, newColor);
-            }
+            this.pendingRematchOffer = { peerId, data };
+            this.showRematchOffer();
         }
     }
 
@@ -781,7 +929,71 @@ class ChessGame {
         this.ui.gameEndMessage.textContent = message;
         this.ui.gameEndModal.classList.remove('hidden');
 
+        this.updateGamesList();
         this.log(`Game ended: ${message}`);
+    }
+
+    closeGameEndModal() {
+        this.ui.gameEndModal.classList.add('hidden');
+    }
+
+    // Modal helper methods
+    showAlert(title, message) {
+        this.ui.alertTitle.textContent = title;
+        this.ui.alertMessage.textContent = message;
+        this.ui.alertModal.classList.remove('hidden');
+    }
+
+    closeAlert() {
+        this.ui.alertModal.classList.add('hidden');
+    }
+
+    showDrawOffer() {
+        this.ui.drawOfferModal.classList.remove('hidden');
+    }
+
+    acceptDraw() {
+        this.ui.drawOfferModal.classList.add('hidden');
+        if (this.pendingDrawOffer) {
+            this.dht.sendMessage(this.pendingDrawOffer.peerId, {
+                type: MESSAGE_TYPES.DRAW_ACCEPT,
+                gameId: this.gameId
+            });
+            this.endGame('Draw accepted!');
+            this.pendingDrawOffer = null;
+        }
+    }
+
+    declineDraw() {
+        this.ui.drawOfferModal.classList.add('hidden');
+        if (this.pendingDrawOffer) {
+            this.dht.sendMessage(this.pendingDrawOffer.peerId, {
+                type: MESSAGE_TYPES.DRAW_DECLINE,
+                gameId: this.gameId
+            });
+            this.pendingDrawOffer = null;
+        }
+    }
+
+    showRematchOffer() {
+        this.ui.rematchOfferModal.classList.remove('hidden');
+    }
+
+    acceptRematch() {
+        this.ui.rematchOfferModal.classList.add('hidden');
+        if (this.pendingRematchOffer) {
+            const newColor = this.playerColor === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE;
+            this.startGame(this.pendingRematchOffer.data.gameId, this.pendingRematchOffer.peerId, newColor);
+            this.pendingRematchOffer = null;
+        }
+    }
+
+    declineRematch() {
+        this.ui.rematchOfferModal.classList.add('hidden');
+        if (this.pendingRematchOffer) {
+            // Could send a decline message if needed
+            this.pendingRematchOffer = null;
+        }
     }
 
     closeGameEndModal() {
@@ -851,6 +1063,44 @@ class ChessGame {
         
         this.ui.findGameBtn.disabled = !isConnected || isPlaying;
         this.ui.createGameBtn.disabled = !isConnected || isPlaying;
+        
+        // Hide search status when playing
+        if (isPlaying) {
+            this.ui.searchStatus.classList.add('hidden');
+        }
+        
+        this.updateGamesList();
+    }
+
+    updateGamesList() {
+        console.log('updateGamesList called - current state:', {
+            gameState: this.gameState,
+            gameId: this.gameId,
+            opponentId: this.opponentId
+        });
+        
+        // Clear current games list
+        this.ui.gamesList.innerHTML = '';
+        
+        // NUCLEAR FIX - ALWAYS show a game if we have opponent info
+        if ((this.gameState === 'playing' || this.opponentId) && this.gameId && this.opponentId) {
+            // Show current active game
+            const gameItem = document.createElement('div');
+            gameItem.className = 'game-item';
+            gameItem.innerHTML = `
+                <span>vs ${this.opponentId.substring(0, 8)}...</span>
+                <span class="game-status">Playing as ${this.playerColor || 'Unknown'}</span>
+            `;
+            this.ui.gamesList.appendChild(gameItem);
+            console.log('Added active game to list');
+        } else {
+            // Show no games message
+            const noGames = document.createElement('p');
+            noGames.className = 'no-games';
+            noGames.textContent = 'No active games';
+            this.ui.gamesList.appendChild(noGames);
+            console.log('Added no games message');
+        }
     }
 }
 
