@@ -313,6 +313,7 @@ class DHT extends EventEmitter {
       // Initialize storage
       this.storage = new Map();
       this.storageTimestamps = new Map();
+      this.keyMapping = new Map(); // Map from hash to original key name
 
       // Initialize peer connections
       this.peers = new Map();
@@ -1429,7 +1430,7 @@ class DHT extends EventEmitter {
    * @param {string} peerId - Sender peer ID
    * @private
    */
-  _handleFindValue(message, peerId) {
+  async _handleFindValue(message, peerId) {
     const peer = this.peers.get(peerId);
     if (!peer) return;
     // Add sender to routing table
@@ -1442,7 +1443,7 @@ class DHT extends EventEmitter {
     const keyStr = message.key;
     const keyHashHex = /^[a-fA-F0-9]{40}$/.test(keyStr)
       ? keyStr
-      : bufferToHex(sha1(toBuffer(keyStr)));
+      : bufferToHex(await sha1(toBuffer(keyStr)));
 
     // Check local storage first
     if (this.storage.has(keyHashHex)) {
@@ -1596,6 +1597,7 @@ class DHT extends EventEmitter {
       replicatedTo: new Set(),
     });
     this.storageTimestamps.set(keyHashHex, timestamp);
+    this.keyMapping.set(keyHashHex, keyStr); // Store original key name
 
     // Enforce storage size limit
     if (this.storage.size > this.MAX_STORE_SIZE) {
@@ -1612,6 +1614,7 @@ class DHT extends EventEmitter {
       if (oldestKey) {
         this.storage.delete(oldestKey);
         this.storageTimestamps.delete(oldestKey);
+        this.keyMapping.delete(oldestKey); // Clean up key mapping
       }
     }
 
@@ -2125,6 +2128,7 @@ class DHT extends EventEmitter {
       if (oldestKey) {
         this.storage.delete(oldestKey);
         this.storageTimestamps.delete(oldestKey);
+        this.keyMapping.delete(oldestKey); // Clean up key mapping
       }
     }
 
@@ -2141,6 +2145,7 @@ class DHT extends EventEmitter {
       replicatedTo: new Set(),
     });
     this.storageTimestamps.set(keyHashHex, timestamp);
+    this.keyMapping.set(keyHashHex, keyStr); // Store original key name
 
     // Find K closest nodes to the key
     const nodes = await this.findNode(keyHashHex);
@@ -2243,6 +2248,7 @@ class DHT extends EventEmitter {
         // Remove invalid entry
         this.storage.delete(keyHashHex);
         this.storageTimestamps.delete(keyHashHex);
+        this.keyMapping.delete(keyHashHex); // Clean up key mapping
       }
     }
 
@@ -2328,6 +2334,7 @@ class DHT extends EventEmitter {
           replicatedTo: new Set(),
         });
         this.storageTimestamps.set(keyHashHex, timestamp);
+        this.keyMapping.set(keyHashHex, key); // Store original key name
         return result;
       }
     }
@@ -2345,6 +2352,7 @@ class DHT extends EventEmitter {
     this.storage.forEach(async (storedData, keyHashHex) => {
       const keyHash = hexToBuffer(keyHashHex);
       const nodes = await this.findNode(keyHashHex); // Find current K closest
+      const originalKey = this.keyMapping.get(keyHashHex) || keyHashHex; // Get original key name
       this._logDebug(
         `Replicating key ${keyHashHex.substring(0, 4)} to ${nodes.length} nodes`
       ); // Use _logDebug
@@ -2361,7 +2369,7 @@ class DHT extends EventEmitter {
           peer.send({
             type: "STORE",
             sender: this.nodeIdHex,
-            key: keyHashHex, // Use hash as key for replication
+            key: originalKey, // Use original key name for replication
             value: storedData.value, // Send only the value, not the metadata
           });
         }
@@ -2376,6 +2384,7 @@ class DHT extends EventEmitter {
   _republishData() {
     this._logDebug("Starting data republication..."); // Use _logDebug
     this.storage.forEach(async (storedData, keyHashHex) => {
+      const originalKey = this.keyMapping.get(keyHashHex) || keyHashHex; // Get original key name
       this._logDebug(`Republishing key ${keyHashHex.substring(0, 4)}`);
       const nodes = await this.findNode(keyHashHex);
       nodes.forEach((node) => {
@@ -2384,7 +2393,7 @@ class DHT extends EventEmitter {
           peer.send({
             type: "STORE",
             sender: this.nodeIdHex,
-            key: keyHashHex,
+            key: originalKey, // Use original key name for republication
             value: storedData.value, // Send only the value, not the metadata
           });
         }
@@ -2415,6 +2424,7 @@ class DHT extends EventEmitter {
       if (isNewPeerClosest) {
         const peer = this.peers.get(newPeerIdHex);
         if (peer && peer.connected) {
+          const originalKey = this.keyMapping.get(keyHashHex) || keyHashHex; // Get original key name
           this._logDebug(
             `New peer ${newPeerIdHex.substring(
               0,
@@ -2424,7 +2434,7 @@ class DHT extends EventEmitter {
           peer.send({
             type: "STORE",
             sender: this.nodeIdHex,
-            key: keyHashHex,
+            key: originalKey, // Use original key name for replication
             value: storedData.value, // Send only the value, not the metadata
           });
         }
@@ -2577,6 +2587,23 @@ class DHT extends EventEmitter {
       this._logDebug(`Error checking path to peer ${peerId.substring(0, 8)}...`, err);
       return false;
     }
+  }
+
+  /**
+   * Get all keys stored in the DHT
+   * @returns {Array<{originalKey: string, hash: string}>} Array of key objects with original names and hashes
+   */
+  getKeys() {
+    this._logDebug(`getKeys - Returning ${this.storage.size} keys from local storage`);
+    const keys = [];
+    for (const hash of this.storage.keys()) {
+      const originalKey = this.keyMapping.get(hash) || hash; // Fall back to hash if original key not found
+      keys.push({
+        originalKey,
+        hash
+      });
+    }
+    return keys;
   }
 }
 

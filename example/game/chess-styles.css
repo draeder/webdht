@@ -160,15 +160,26 @@ button:disabled {
     gap: 8px;
 }
 
-.status-item {
-    padding: 8px 12px;
-    background: #f7fafc;
+/* Main interface button styling for consistency */
+.button {
+    background: #0366d6;
+    color: white;
+    border: none;
+    padding: 8px 16px;
     border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
     font-size: 14px;
+    transition: background-color 0.2s;
 }
 
-.status-item strong {
-    color: #2d3748;
+.button:hover:not(:disabled) {
+    background: #0256b4;
+}
+
+.button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 /* Matchmaking */

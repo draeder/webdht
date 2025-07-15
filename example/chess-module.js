@@ -81,6 +81,7 @@ export class ChessModule {
         this.gossipEnabled = true;
         this.gossipMoveQueue = new Map(); // gameId -> array of pending moves
         this.processedGossipMoves = new Set(); // track processed move IDs to avoid duplicates
+        this.processedGameActions = new Set(); // track processed game action IDs to avoid duplicates
         this.uiInitialized = false;
         
         // Game start handshake tracking
@@ -95,6 +96,9 @@ export class ChessModule {
         this.hasLoggedGetKeysError = false;
         this.hasLoggedNoGetKeys = false;
         this.lastOpponentConnectedState = null;
+        
+        // Prevent multiple draw offer modals
+        this.pendingDrawOffer = false;
 
         // Check if chess tab is currently active
         this.checkInitialTabState();
@@ -170,12 +174,41 @@ export class ChessModule {
             return;
         }
         
-        // Button event listeners
-        this.ui.findGameBtn?.addEventListener('click', () => this.findGame());
-        this.ui.cancelSearchBtn?.addEventListener('click', () => this.cancelSearch());
-        this.ui.resignBtn?.addEventListener('click', () => this.resign());
-        this.ui.drawBtn?.addEventListener('click', () => this.offerDraw());
-        this.ui.rematchBtn?.addEventListener('click', () => this.requestRematch());
+        // Button event listeners with debug logging
+        if (this.ui.findGameBtn) {
+            this.ui.findGameBtn.addEventListener('click', () => this.findGame());
+            console.log('Chess: Find game button event listener attached');
+        } else {
+            console.warn('Chess: Find game button not found');
+        }
+        
+        if (this.ui.cancelSearchBtn) {
+            this.ui.cancelSearchBtn.addEventListener('click', () => this.cancelSearch());
+            console.log('Chess: Cancel search button event listener attached');
+        } else {
+            console.warn('Chess: Cancel search button not found');
+        }
+        
+        if (this.ui.resignBtn) {
+            this.ui.resignBtn.addEventListener('click', () => this.resign());
+            console.log('Chess: Resign button event listener attached');
+        } else {
+            console.warn('Chess: Resign button not found');
+        }
+        
+        if (this.ui.drawBtn) {
+            this.ui.drawBtn.addEventListener('click', () => this.offerDraw());
+            console.log('Chess: Draw button event listener attached');
+        } else {
+            console.warn('Chess: Draw button not found');
+        }
+        
+        if (this.ui.rematchBtn) {
+            this.ui.rematchBtn.addEventListener('click', () => this.requestRematch());
+            console.log('Chess: Rematch button event listener attached');
+        } else {
+            console.warn('Chess: Rematch button not found');
+        }
     }
 
     bindDHTEvents() {
@@ -235,56 +268,119 @@ export class ChessModule {
             hasGameId: !!this.gameId
         });
         
-        if (this.ui && this.ui.findGameBtn) {
-            // Update button based on current state
-            if (this.gameState === 'playing') {
-                this.ui.findGameBtn.disabled = true;
-                this.ui.findGameBtn.textContent = 'Game Active';
-            } else if (!isReady) {
+        // Clean and consistent button state management
+        if (this.ui && this.ui.findGameBtn && this.ui.cancelSearchBtn) {
+            if (!isReady) {
+                // DHT not available - show disabled find game button
                 this.ui.findGameBtn.disabled = true;
                 this.ui.findGameBtn.textContent = 'DHT Not Available';
+                this.ui.findGameBtn.className = 'btn btn-secondary';
+                this.ui.findGameBtn.style.display = 'block';
+                this.ui.cancelSearchBtn.style.display = 'none';
+                
+            } else if (this.gameState === 'playing') {
+                // Game active - hide both buttons completely
+                this.ui.findGameBtn.style.display = 'none';
+                this.ui.cancelSearchBtn.style.display = 'none';
+                
             } else if (this.isSearching) {
-                this.ui.findGameBtn.disabled = true;
-                this.ui.findGameBtn.textContent = 'Searching...';
+                // Searching - hide find game, show cancel button only
+                this.ui.findGameBtn.style.display = 'none';
+                this.ui.cancelSearchBtn.disabled = false;
+                this.ui.cancelSearchBtn.textContent = 'Cancel Search';
+                this.ui.cancelSearchBtn.className = 'btn btn-secondary';
+                this.ui.cancelSearchBtn.style.display = 'block';
+                
+            } else if (this.gameState === 'ended') {
+                // Game ended - show prominent new game button
+                this.ui.findGameBtn.disabled = false;
+                this.ui.findGameBtn.textContent = 'Find New Game';
+                this.ui.findGameBtn.className = 'btn btn-success';
+                this.ui.findGameBtn.style.display = 'block';
+                this.ui.cancelSearchBtn.style.display = 'none';
+                
             } else {
+                // Default - ready to find game
                 this.ui.findGameBtn.disabled = false;
                 this.ui.findGameBtn.textContent = 'Find Game';
+                this.ui.findGameBtn.className = 'btn btn-primary';
+                this.ui.findGameBtn.style.display = 'block';
+                this.ui.cancelSearchBtn.style.display = 'none';
             }
         }
-
-        if (this.ui && this.ui.cancelSearchBtn) {
-            this.ui.cancelSearchBtn.disabled = !this.isSearching;
-        }
         
-        // Update search status display
+        // Clean search status display
         if (this.ui && this.ui.searchStatus) {
             if (this.gameState === 'playing') {
-                // Hide search status when game is active
                 this.ui.searchStatus.style.display = 'none';
             } else if (this.isSearching) {
-                // Show "Searching for opponents..." when actively searching
                 this.ui.searchStatus.style.display = 'block';
-                this.ui.searchStatus.textContent = 'Searching for opponents...';
+                this.ui.searchStatus.textContent = 'Looking for an opponent...';
+                this.ui.searchStatus.className = 'search-status searching';
+            } else if (this.gameState === 'ended') {
+                this.ui.searchStatus.style.display = 'block';
+                this.ui.searchStatus.textContent = 'Game ended. Ready for a new game!';
+                this.ui.searchStatus.className = 'search-status ready';
             } else {
-                // Hide search status when not searching
                 this.ui.searchStatus.style.display = 'none';
             }
         }
         
-        // Update games list to show active game
+        // Clean games list display
         if (this.ui && this.ui.gamesList) {
             if (this.gameState === 'playing' && this.gameId && this.opponentId) {
-                // Show active game
                 this.ui.gamesList.innerHTML = `
                     <div class="active-game">
-                        <strong>Active Game:</strong> ${this.gameId.substring(0, 16)}...<br>
-                        <strong>Opponent:</strong> ${this.opponentId.substring(0, 8)}<br>
-                        <strong>Your Color:</strong> ${this.playerColor === 'white' ? 'White' : 'Black'}
+                        <h5>🎮 Active Game</h5>
+                        <p><strong>Opponent:</strong> ${this.opponentId.substring(0, 8)}...</p>
+                        <p><strong>Playing as:</strong> ${this.playerColor === 'white' ? '⚪ White' : '⚫ Black'}</p>
+                    </div>
+                `;
+            } else if (this.isSearching) {
+                this.ui.gamesList.innerHTML = `
+                    <div class="searching-status">
+                        <p>🔍 Looking for an opponent...</p>
+                        <small>This may take a few seconds</small>
                     </div>
                 `;
             } else {
-                // Show no active games
-                this.ui.gamesList.innerHTML = '<p>No active games</p>';
+                this.ui.gamesList.innerHTML = `
+                    <div class="no-games">
+                        <p>No active games</p>
+                    </div>
+                `;
+            }
+        }
+        
+        // Clean game action buttons
+        if (this.ui) {
+            const isPlaying = this.gameState === 'playing';
+            
+            if (this.ui.resignBtn) {
+                this.ui.resignBtn.style.display = isPlaying ? 'inline-block' : 'none';
+                this.ui.resignBtn.disabled = false;
+                this.ui.resignBtn.className = 'btn btn-danger';
+                this.ui.resignBtn.textContent = 'Resign';
+            }
+            
+            if (this.ui.drawBtn) {
+                this.ui.drawBtn.style.display = isPlaying ? 'inline-block' : 'none';
+                this.ui.drawBtn.disabled = this.pendingDrawOffer;
+                if (this.pendingDrawOffer) {
+                    this.ui.drawBtn.className = 'btn btn-secondary';
+                    this.ui.drawBtn.textContent = 'Draw Pending...';
+                } else {
+                    this.ui.drawBtn.className = 'btn btn-info';
+                    this.ui.drawBtn.textContent = 'Offer Draw';
+                }
+            }
+            
+            if (this.ui.rematchBtn) {
+                const showRematch = this.gameState === 'ended' && this.opponentId;
+                this.ui.rematchBtn.style.display = showRematch ? 'inline-block' : 'none';
+                this.ui.rematchBtn.disabled = false;
+                this.ui.rematchBtn.className = 'btn btn-primary';
+                this.ui.rematchBtn.textContent = 'Request Rematch';
             }
         }
     }
@@ -669,7 +765,7 @@ export class ChessModule {
         }
     }
 
-    handleGossipGameAction(message, peerId) {
+    async handleGossipGameAction(message, peerId) {
         console.log('Chess: Handling gossip game action from:', peerId.substring(0, 8), 'action:', message.action);
         
         // Validate this is for our current game
@@ -684,6 +780,16 @@ export class ChessModule {
             return;
         }
         
+        // Check for duplicate game actions using unique action ID
+        const actionId = message.actionId || `${message.action}_${message.timestamp}_${peerId}`;
+        if (this.processedGameActions.has(actionId)) {
+            console.log('Chess: Ignoring duplicate game action:', message.action, 'actionId:', actionId);
+            return;
+        }
+        
+        // Mark this action as processed
+        this.processedGameActions.add(actionId);
+        
         // Handle different game actions
         switch (message.action) {
             case 'resign':
@@ -693,22 +799,49 @@ export class ChessModule {
                 
             case 'draw_offer':
                 console.log('Chess: Opponent offered a draw');
-                const acceptDraw = confirm('Your opponent is offering a draw. Do you accept?');
+                const acceptDraw = await this.showModal(
+                    'Draw Offer',
+                    'Your opponent is offering a draw. Do you accept?',
+                    'Accept',
+                    'Decline'
+                );
                 if (acceptDraw) {
                     this.endGame('Game ended in a draw by agreement');
                     // Send draw acceptance back
                     this.sendGameAction('draw_accept');
+                } else {
+                    // Send decline message to opponent
+                    this.sendGameAction('draw_decline');
+                    if (this.ui && this.ui.chessGameStatus) {
+                        this.ui.chessGameStatus.textContent = 'Draw offer declined - game continues';
+                    }
                 }
                 break;
                 
             case 'draw_accept':
                 console.log('Chess: Opponent accepted draw offer');
+                // Reset pending draw offer flag
+                this.pendingDrawOffer = false;
                 this.endGame('Game ended in a draw by agreement');
+                break;
+                
+            case 'draw_decline':
+                console.log('Chess: Opponent declined draw offer');
+                // Reset pending draw offer flag for the person who made the offer
+                this.pendingDrawOffer = false;
+                if (this.ui && this.ui.chessGameStatus) {
+                    this.ui.chessGameStatus.textContent = 'Draw offer declined by opponent - game continues';
+                }
                 break;
                 
             case 'rematch_request':
                 console.log('Chess: Opponent requested a rematch');
-                const acceptRematch = confirm('Your opponent wants a rematch. Do you accept?');
+                const acceptRematch = await this.showModal(
+                    'Rematch Request',
+                    'Your opponent wants a rematch. Do you accept?',
+                    'Accept',
+                    'Decline'
+                );
                 if (acceptRematch) {
                     // Start a new game
                     this.findGame();
@@ -883,13 +1016,13 @@ export class ChessModule {
             return;
         }
 
-        // Reset state if it's 'ended' to allow new search
+        // Reset state if it's 'ended' to allow new search - FIX: Use comprehensive reset
         if (this.gameState === 'ended') {
             console.log('Chess: Resetting ended game state to allow new search');
-            this.gameState = 'disconnected';
+            this.resetGameState();
         }
 
-        console.log('Chess: Starting simple DHT matchmaking');
+        console.log('Chess: Starting robust DHT matchmaking');
         this.isSearching = true;
         this.gameState = 'searching';
         
@@ -900,32 +1033,9 @@ export class ChessModule {
         }
 
         try {
-            // Step 1: Check the matchmaking key
-            console.log('Chess: Checking matchmaking key...');
-            let matchmakingData = await this.dht.get(GAME_CONFIG.MATCHMAKING_KEY);
-            let matchmakingState = {};
+            // Use multiple attempts and longer delays for better reliability
+            let matchmakingState = await this.getMatchmakingStateWithRetry();
             
-            if (matchmakingData) {
-                try {
-                    let parsedData = JSON.parse(matchmakingData);
-                    console.log('Chess: Found matchmaking state:', parsedData);
-                    
-                    // Handle case where DHT returns an array instead of object
-                    if (Array.isArray(parsedData)) {
-                        console.log('Chess: Converting array to object format');
-                        matchmakingState = {};
-                    } else if (typeof parsedData === 'object' && parsedData !== null) {
-                        matchmakingState = parsedData;
-                    } else {
-                        console.warn('Chess: Unexpected matchmaking data type, treating as empty');
-                        matchmakingState = {};
-                    }
-                } catch (err) {
-                    console.warn('Chess: Invalid matchmaking data, treating as empty');
-                    matchmakingState = {};
-                }
-            }
-
             // Check if we can pair with someone searching - NO TIME LIMITS!
             const searchingPeers = Object.entries(matchmakingState).filter(([peerId, data]) => 
                 peerId !== this.dht.nodeId && 
@@ -938,20 +1048,16 @@ export class ChessModule {
                 state: data.state
             })));
 
-            console.log('Chess: Final searching peers for matching:', searchingPeers.length, searchingPeers.map(([id, data]) => ({
-                id: id.substring(0, 8),
-                age: data.timestamp ? (Date.now() - data.timestamp) / 1000 : 'no timestamp'
-            })));
-
             if (searchingPeers.length === 0) {
                 // No one searching - add ourselves with "searching" state (Peer 1 scenario)
                 console.log('Chess: No one searching, adding ourselves as Peer 1');
                 matchmakingState[this.dht.nodeId] = {
                     state: 'searching',
-                    timestamp: Date.now()
+                    timestamp: Date.now(),
+                    nodeId: this.dht.nodeId // Include nodeId for validation
                 };
                 
-                await this.dht.put(GAME_CONFIG.MATCHMAKING_KEY, JSON.stringify(matchmakingState));
+                await this.updateMatchmakingStateWithRetry(matchmakingState);
                 
                 // Start polling to check for other players
                 this.startSimpleMatchmakingPolling();
@@ -961,10 +1067,11 @@ export class ChessModule {
                 console.log('Chess: Found searching peer, adding ourselves as Peer 2');
                 matchmakingState[this.dht.nodeId] = {
                     state: 'searching',
-                    timestamp: Date.now()
+                    timestamp: Date.now(),
+                    nodeId: this.dht.nodeId // Include nodeId for validation
                 };
                 
-                await this.dht.put(GAME_CONFIG.MATCHMAKING_KEY, JSON.stringify(matchmakingState));
+                await this.updateMatchmakingStateWithRetry(matchmakingState);
                 
                 // Start polling to see if Peer 1 matches us
                 this.startSimpleMatchmakingPolling();
@@ -1109,30 +1216,42 @@ export class ChessModule {
                 return;
             }
             
-            const ourMessageKeys = keys.filter(key => key.startsWith(messagePrefix));
+            const ourMessageKeys = keys.filter(key => key.originalKey && key.originalKey.startsWith(messagePrefix));
             console.log('Chess: Found', ourMessageKeys.length, 'potential gossip messages in DHT');
             
             for (const messageKey of ourMessageKeys) {
                 try {
-                    const messageData = await this.dht.get(messageKey);
+                    const messageData = await this.dht.get(messageKey.originalKey);
                     if (messageData) {
                         const message = JSON.parse(messageData);
                         console.log('Chess: Processing stored gossip message:', message.subType);
                         
                         // Process the message as if it came via direct gossip
-                        this.handleGossipMessage(message, message.playerId);
+                        // Use senderId if playerId is not available
+                        const senderId = message.playerId || message.senderId;
+                        if (senderId) {
+                            this.handleGossipMessage(message, senderId);
+                        } else {
+                            console.warn('Chess: Stored gossip message has no valid sender ID, skipping');
+                        }
                         
-                        // Remove the processed message from DHT
-                        await this.dht.delete(messageKey);
-                        console.log('Chess: Removed processed gossip message from DHT:', messageKey);
+                        // Remove the processed message from DHT (if delete method exists)
+                        if (typeof this.dht.delete === 'function') {
+                            await this.dht.delete(messageKey.originalKey);
+                            console.log('Chess: Removed processed gossip message from DHT:', messageKey.originalKey);
+                        } else {
+                            console.log('Chess: DHT delete method not available, message will remain in DHT');
+                        }
                     }
                 } catch (err) {
                     console.error('Chess: Error processing stored gossip message:', err);
-                    // Try to remove malformed message
-                    try {
-                        await this.dht.delete(messageKey);
-                    } catch (deleteErr) {
-                        console.error('Chess: Error removing malformed message:', deleteErr);
+                    // Try to remove malformed message only if delete method exists
+                    if (typeof this.dht.delete === 'function') {
+                        try {
+                            await this.dht.delete(messageKey.originalKey);
+                        } catch (deleteErr) {
+                            console.error('Chess: Error removing malformed message:', deleteErr);
+                        }
                     }
                 }
             }
@@ -1243,6 +1362,249 @@ export class ChessModule {
         console.log('Chess: Move polling started with 3-second interval');
     }
 
+    startRobustMatchmakingPolling() {
+        if (this.matchmakingInterval) {
+            clearInterval(this.matchmakingInterval);
+        }
+
+        console.log('Chess: Starting robust matchmaking polling');
+        
+        this.matchmakingInterval = setInterval(async () => {
+            // CRITICAL: Check if we should stop polling
+            if (!this.isSearching || this.gameState !== 'searching') {
+                console.log('Chess: Stopping robust matchmaking polling - no longer searching. State:', this.gameState, 'Searching:', this.isSearching);
+                if (this.matchmakingInterval) {
+                    clearInterval(this.matchmakingInterval);
+                    this.matchmakingInterval = null;
+                }
+                return;
+            }
+            
+            // Additional safety checks
+            if (this.gameId) {
+                console.log('Chess: Stopping matchmaking polling - game ID already exists:', this.gameId);
+                if (this.matchmakingInterval) {
+                    clearInterval(this.matchmakingInterval);
+                    this.matchmakingInterval = null;
+                }
+                return;
+            }
+
+            if (this.gameState === 'playing') {
+                console.log('Chess: Stopping matchmaking polling - already in playing state');
+                if (this.matchmakingInterval) {
+                    clearInterval(this.matchmakingInterval);
+                    this.matchmakingInterval = null;
+                }
+                return;
+            }
+
+            try {
+                console.log('Chess: Polling matchmaking state with robust method...');
+                let matchmakingState = await this.getMatchmakingStateWithRetry(2, 500);
+
+                console.log('Chess: Full matchmaking state from DHT:', matchmakingState);
+
+                // Check our own state in the matchmaking data
+                const ourData = matchmakingState[this.dht.nodeId];
+                console.log('Chess: Our data in matchmaking state:', ourData, 'nodeId:', this.dht.nodeId.substring(0, 8));
+                
+                // FIRST: Check if both players are ready to start the game (highest priority check)
+                const readyPeers = Object.entries(matchmakingState).filter(([peerId, data]) => 
+                    peerId !== this.dht.nodeId && data && data.state === 'ready'
+                );
+                
+                console.log('Chess: Ready peers check:', {
+                    ourData: ourData,
+                    ourState: ourData?.state,
+                    readyPeersCount: readyPeers.length,
+                    readyPeers: readyPeers.map(([id, data]) => ({ id: id.substring(0, 8), state: data.state }))
+                });
+                
+                if (ourData && ourData.state === 'ready' && readyPeers.length > 0) {
+                    // Both players are ready! But only ONE should initiate the handshake to avoid race conditions
+                    const opponentId = readyPeers[0][0];
+                    
+                    // Determine colors and game ID (must be identical for both players)
+                    const playerIds = [this.dht.nodeId, opponentId].sort();
+                    const amIWhite = playerIds[0] === this.dht.nodeId;
+                    const myColor = amIWhite ? COLORS.WHITE : COLORS.BLACK;
+                    const gameId = `game_${Date.now()}_${playerIds[0].substring(0, 8)}_${playerIds[1].substring(0, 8)}`;
+                    
+                    // Only the player with the lexicographically smaller ID should initiate the handshake
+                    const shouldInitiate = this.dht.nodeId < opponentId;
+                    
+                    console.log('Chess: Game start decision:', {
+                        myId: this.dht.nodeId.substring(0, 8),
+                        opponentId: opponentId.substring(0, 8),
+                        shouldInitiate: shouldInitiate,
+                        comparison: `${this.dht.nodeId} < ${opponentId} = ${shouldInitiate}`
+                    });
+                    
+                    if (shouldInitiate) {
+                        // Check if we're already in a game to prevent duplicate starts
+                        if (this.gameState === 'playing' || this.gameId) {
+                            console.log('Chess: Ignoring game initiation - already in game. State:', this.gameState, 'GameId:', this.gameId);
+                            return;
+                        }
+                        
+                        console.log('Chess: Both players ready, I am initiating gossip handshake with opponent:', opponentId.substring(0, 8));
+                        console.log('Chess: Color assignment - Me:', myColor, 'Opponent:', myColor === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE);
+                        
+                        // Stop polling immediately and set state to prevent further polling
+                        this.isSearching = false;
+                        this.gameState = 'playing';
+                        if (this.matchmakingInterval) {
+                            clearInterval(this.matchmakingInterval);
+                            this.matchmakingInterval = null;
+                        }
+                        
+                        // Set up handshake tracking
+                        this.gameStartHandshake.opponentId = opponentId;
+                        this.gameStartHandshake.gameId = gameId;
+                        
+                        // Start the game locally first
+                        this.startGame(gameId, opponentId, myColor);
+                        
+                        // Enhanced peer connectivity debugging
+                        console.log('Chess: Pre-handshake peer check for opponent:', opponentId.substring(0, 8));
+                        this.debugConnectionState();
+                        
+                        // Send gossip confirmation to opponent
+                        const handshakeSuccess = await this.sendGameStartConfirmation(opponentId, gameId);
+                        if (!handshakeSuccess) {
+                            console.error('Chess: Failed to send initial game start confirmation');
+                        }
+                        
+                        // Start move polling for fallback
+                        this.startReducedMovePolling();
+                    } else {
+                        console.log('Chess: Both players ready, waiting for opponent to initiate handshake. Opponent:', opponentId.substring(0, 8));
+                        
+                        // Set up a timeout fallback in case the initiator doesn't start the game
+                        if (!this.handshakeTimeout) {
+                            console.log('Chess: Setting up handshake timeout fallback (15 seconds)');
+                            this.handshakeTimeout = setTimeout(async () => {
+                                console.warn('Chess: Handshake timeout! Opponent did not initiate game. Starting game ourselves as fallback.');
+                                
+                                // Stop polling and start the game ourselves
+                                this.isSearching = false;
+                                this.gameState = 'playing';
+                                if (this.matchmakingInterval) {
+                                    clearInterval(this.matchmakingInterval);
+                                    this.matchmakingInterval = null;
+                                }
+                                
+                                // Set up handshake tracking
+                                this.gameStartHandshake.opponentId = opponentId;
+                                this.gameStartHandshake.gameId = gameId;
+                                
+                                // Start the game
+                                this.startGame(gameId, opponentId, myColor);
+                                
+                                // Send handshake
+                                await this.sendGameStartConfirmation(opponentId, gameId);
+                                
+                                // Start move polling
+                                this.startReducedMovePolling();
+                            }, 15000); // Increased timeout to 15 seconds for unreliable networks
+                        }
+                    }
+                    return; // Skip the rest of the polling logic
+                }
+                
+                // Handle peer discovery and state transitions
+                let needsUpdate = false;
+                const now = Date.now();
+                
+                if (!ourData) {
+                    // We're not in the matchmaking state - add ourselves
+                    console.log('Chess: Adding ourselves to matchmaking state');
+                    matchmakingState[this.dht.nodeId] = {
+                        state: 'searching',
+                        timestamp: now,
+                        nodeId: this.dht.nodeId
+                    };
+                    needsUpdate = true;
+                } else if (ourData.state === 'searching') {
+                    // Look for other searching peers to match with
+                    const searchingPeers = Object.entries(matchmakingState).filter(([peerId, data]) => 
+                        peerId !== this.dht.nodeId && 
+                        data && data.state === 'searching'
+                    );
+                    
+                    if (searchingPeers.length > 0) {
+                        // Found someone to match with! 
+                        console.log('Chess: Found peer to match with:', searchingPeers[0][0].substring(0, 8));
+                        
+                        // Both players set themselves to 'ready' state
+                        matchmakingState[this.dht.nodeId] = {
+                            ...ourData,
+                            state: 'ready',
+                            timestamp: now,
+                            matchWith: searchingPeers[0][0]
+                        };
+                        needsUpdate = true;
+                    } else {
+                        // Update timestamp to show we're still active
+                        if ((now - ourData.timestamp) > 10000) { // Update every 10 seconds
+                            matchmakingState[this.dht.nodeId] = {
+                                ...ourData,
+                                timestamp: now
+                            };
+                            needsUpdate = true;
+                        }
+                    }
+                }
+
+                if (needsUpdate) {
+                    await this.updateMatchmakingStateWithRetry({ [this.dht.nodeId]: matchmakingState[this.dht.nodeId] });
+                }
+
+            } catch (err) {
+                console.error('Chess: Error during robust matchmaking polling:', err);
+                // Don't stop polling on errors - network might be unreliable
+            }
+        }, 3000); // Increased interval to 3 seconds for better network reliability
+    }
+
+    /**
+     * Enhanced matchmaking with better DHT operations for unreliable connections
+     */
+    async robustDHTOperation(operation, key, value = null, maxRetries = 3) {
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                let result;
+                if (operation === 'get') {
+                    result = await this.dht.get(key);
+                } else if (operation === 'put') {
+                    result = await this.dht.put(key, value);
+                } else if (operation === 'delete') {
+                    if (typeof this.dht.delete === 'function') {
+                        result = await this.dht.delete(key);
+                    } else {
+                        console.warn('Chess: DHT delete method not available');
+                        return false;
+                    }
+                }
+                
+                // Add a small delay to allow network propagation
+                if (operation === 'put' && attempt < maxRetries - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                }
+                
+                return result;
+            } catch (err) {
+                console.error(`Chess: DHT ${operation} failed (attempt ${attempt + 1}/${maxRetries}):`, err);
+                if (attempt === maxRetries - 1) throw err;
+                
+                // Exponential backoff
+                const delay = 1000 * Math.pow(2, attempt);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+
     startSimpleMatchmakingPolling() {
         if (this.matchmakingInterval) {
             clearInterval(this.matchmakingInterval);
@@ -1261,7 +1623,7 @@ export class ChessModule {
                 return;
             }
             
-            // Additional safety check - if we somehow have a game ID already, stop
+            // Additional safety checks
             if (this.gameId) {
                 console.log('Chess: Stopping matchmaking polling - game ID already exists:', this.gameId);
                 if (this.matchmakingInterval) {
@@ -1271,7 +1633,6 @@ export class ChessModule {
                 return;
             }
 
-            // Extra safety check - if we're already in playing state, stop
             if (this.gameState === 'playing') {
                 console.log('Chess: Stopping matchmaking polling - already in playing state');
                 if (this.matchmakingInterval) {
@@ -1282,8 +1643,8 @@ export class ChessModule {
             }
 
             try {
-                console.log('Chess: Polling matchmaking state...');
-                let matchmakingData = await this.dht.get(GAME_CONFIG.MATCHMAKING_KEY);
+                console.log('Chess: Polling matchmaking state with robust operations...');
+                let matchmakingData = await this.robustDHTOperation('get', GAME_CONFIG.MATCHMAKING_KEY);
                 let matchmakingState = {};
                 
                 if (matchmakingData) {
@@ -1307,111 +1668,27 @@ export class ChessModule {
                     }
                 }
 
+                // Clean up stale entries first (older than 2 minutes)
+                const now = Date.now();
+                const cleanedState = {};
+                Object.entries(matchmakingState).forEach(([peerId, data]) => {
+                    if (data && data.timestamp && (now - data.timestamp) < 2 * 60 * 1000) {
+                        cleanedState[peerId] = data;
+                    } else if (peerId === this.dht.nodeId) {
+                        // Always keep our own entry
+                        cleanedState[peerId] = data;
+                    } else {
+                        console.log(`Chess: Cleaning up stale entry for peer: ${peerId.substring(0, 8)}`);
+                    }
+                });
+                matchmakingState = cleanedState;
+
                 // Check our own state in the matchmaking data
                 const ourData = matchmakingState[this.dht.nodeId];
                 console.log('Chess: Our data in matchmaking state:', ourData, 'nodeId:', this.dht.nodeId.substring(0, 8));
                 
-                // FIRST: Check if both players are ready to start the game (highest priority check)
-                const readyPeers = Object.entries(matchmakingState).filter(([peerId, data]) => 
-                    peerId !== this.dht.nodeId && data.state === 'ready'
-                );
-                
-                if (ourData && ourData.state === 'ready' && readyPeers.length > 0) {
-                    // Both players are ready! But only ONE should initiate the handshake to avoid race conditions
-                    const opponentId = readyPeers[0][0];
-                    
-                    // Determine colors and game ID (must be identical for both players)
-                    const playerIds = [this.dht.nodeId, opponentId].sort();
-                    const amIWhite = playerIds[0] === this.dht.nodeId;
-                    const myColor = amIWhite ? COLORS.WHITE : COLORS.BLACK;
-                    const gameId = `game_${Date.now()}_${playerIds[0].substring(0, 8)}_${playerIds[1].substring(0, 8)}`;
-                    
-                    // Only the player with the lexicographically smaller ID should initiate the handshake
-                    // This prevents both players from initiating simultaneously
-                    const shouldInitiate = this.dht.nodeId < opponentId;
-                    
-                    if (shouldInitiate) {
-                        // Check if we're already in a game to prevent duplicate starts
-                        if (this.gameState === 'playing' || this.gameId) {
-                            console.log('Chess: Ignoring game initiation - already in game. State:', this.gameState, 'GameId:', this.gameId);
-                            return;
-                        }
-                        
-                        console.log('Chess: Both players ready, I am initiating gossip handshake with opponent:', opponentId.substring(0, 8));
-                        console.log('Chess: Color assignment - Me:', myColor, 'Opponent:', myColor === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE);
-                        
-                        // Stop polling immediately and set state to prevent further polling
-                        this.isSearching = false;
-                        this.gameState = 'playing';  // Set this immediately to prevent race conditions
-                        if (this.matchmakingInterval) {
-                            clearInterval(this.matchmakingInterval);
-                            this.matchmakingInterval = null;
-                        }
-                        
-                        // Set up handshake tracking
-                        this.gameStartHandshake.opponentId = opponentId;
-                        this.gameStartHandshake.gameId = gameId;
-                        
-                        // Start the game locally first (so it's ready when handshake completes)
-                        this.startGame(gameId, opponentId, myColor);
-                        
-                        // Check peer connectivity
-                        console.log('Chess: Pre-handshake peer check for opponent:', opponentId.substring(0, 8));
-                        console.log('Chess: DHT has peers:', this.dht.peers ? this.dht.peers.size : 0);
-                        if (this.dht.peers) {
-                            console.log('Chess: Available peers:', Array.from(this.dht.peers.keys()).map(id => ({
-                                id: id.substring(0, 8),
-                                connected: this.dht.peers.get(id)?.connected
-                            })));
-                        }
-                        
-                        // Send gossip confirmation to opponent (will use DHT fallback if needed)
-                        const handshakeSuccess = await this.sendGameStartConfirmation(opponentId, gameId);
-                        if (!handshakeSuccess) {
-                            console.error('Chess: Failed to send initial game start confirmation');
-                        }
-                        
-                        // Start move polling for fallback
-                        this.startReducedMovePolling();
-                    } else {
-                        console.log('Chess: Both players ready, waiting for opponent to initiate handshake. Opponent:', opponentId.substring(0, 8));
-                        console.log('Chess: Color assignment - Me:', myColor, 'Opponent:', myColor === COLORS.WHITE ? COLORS.BLACK : COLORS.WHITE);
-                        
-                        // Set up a timeout fallback in case the initiator doesn't start the game
-                        if (!this.handshakeTimeout) {
-                            console.log('Chess: Setting up handshake timeout fallback (10 seconds)');
-                            this.handshakeTimeout = setTimeout(async () => {
-                                console.warn('Chess: Handshake timeout! Opponent did not initiate game. Starting game ourselves as fallback.');
-                                
-                                // Stop polling and start the game ourselves
-                                this.isSearching = false;
-                                this.gameState = 'playing';
-                                if (this.matchmakingInterval) {
-                                    clearInterval(this.matchmakingInterval);
-                                    this.matchmakingInterval = null;
-                                }
-                                
-                                // Set up handshake tracking
-                                this.gameStartHandshake.opponentId = opponentId;
-                                this.gameStartHandshake.gameId = gameId;
-                                
-                                // Start the game
-                                this.startGame(gameId, opponentId, myColor);
-                                
-                                // Send handshake confirmation
-                                await this.sendGameStartConfirmation(opponentId, gameId);
-                                
-                                this.handshakeTimeout = null;
-                            }, 10000); // 10 second timeout
-                        }
-                    }
-                    
-                    return;
-                }
-                
                 // Handle our own state based on what's actually in the DHT
                 let needsUpdate = false;
-                const now = Date.now();
                 
                 if (!ourData) {
                     // We're not in the state - re-add ourselves
@@ -1421,39 +1698,10 @@ export class ChessModule {
                         timestamp: now
                     };
                     needsUpdate = true;
-                } else if (ourData.state === 'ready') {
-                    // We're ready but opponent isn't ready yet - just wait and refresh timestamp
-                    console.log('Chess: We are ready, waiting for opponent to also be ready...');
-                    matchmakingState[this.dht.nodeId].timestamp = now;
-                    needsUpdate = true;
-                } else if (ourData.state === 'matched') {
-                    // We've been matched! Check if opponent is also matched, then set both to ready
-                    console.log('Chess: Found that we have been matched!');
-                    
-                    const matchedPeers = Object.entries(matchmakingState).filter(([peerId, data]) => 
-                        peerId !== this.dht.nodeId && data.state === 'matched'
-                    );
-                    
-                    if (matchedPeers.length > 0) {
-                        const opponentId = matchedPeers[0][0];
-                        console.log('Chess: Opponent also matched, setting both to ready. Opponent:', opponentId.substring(0, 8));
-                        
-                        // Set both players to "ready" state
-                        matchmakingState[this.dht.nodeId].state = 'ready';
-                        matchmakingState[opponentId].state = 'ready';
-                        await this.dht.put(GAME_CONFIG.MATCHMAKING_KEY, JSON.stringify(matchmakingState));
-                        
-                        console.log('Chess: Both players set to ready, will check on next poll cycle for game start');
-                        needsUpdate = false; // Don't update again since we just updated
-                        return;
-                    } else {
-                        // We're matched but no opponent found - this shouldn't happen, but handle it
-                        console.log('Chess: We are matched but no opponent found, resetting to searching');
-                    }
                 } else if (ourData.state === 'searching') {
                     // We're searching - check if we can match with someone
                     const searchingPeers = Object.entries(matchmakingState).filter(([peerId, data]) => 
-                        peerId !== this.dht.nodeId && data.state === 'searching'
+                        peerId !== this.dht.nodeId && data && data.state === 'searching'
                     );
                     
                     if (searchingPeers.length > 0) {
@@ -1461,24 +1709,48 @@ export class ChessModule {
                         const potentialOpponentId = searchingPeers[0][0];
                         console.log('Chess: Found potential opponent:', potentialOpponentId.substring(0, 8));
                         
-                        // First, check if this peer actually exists in our DHT
+                        // Check if this peer exists in our DHT
                         const peerExists = this.isPeerInDHT(potentialOpponentId);
                         
                         if (peerExists) {
-                            // Peer exists in our DHT! Proceed with matching.
-                            console.log('Chess: Peer exists in DHT! Setting both players to matched. Opponent:', potentialOpponentId.substring(0, 8));
+                            // Start game immediately - simpler approach
+                            console.log('Chess: Peer exists in DHT! Starting game with opponent:', potentialOpponentId.substring(0, 8));
                             
-                            matchmakingState[this.dht.nodeId].state = 'matched';
-                            matchmakingState[potentialOpponentId].state = 'matched';
+                            // Remove both players from matchmaking
+                            delete matchmakingState[this.dht.nodeId];
+                            delete matchmakingState[potentialOpponentId];
+                            await this.robustDHTOperation('put', GAME_CONFIG.MATCHMAKING_KEY, JSON.stringify(matchmakingState));
                             
-                            await this.dht.put(GAME_CONFIG.MATCHMAKING_KEY, JSON.stringify(matchmakingState));
+                            // Determine colors and game ID
+                            const playerIds = [this.dht.nodeId, potentialOpponentId].sort();
+                            const amIWhite = playerIds[0] === this.dht.nodeId;
+                            const myColor = amIWhite ? COLORS.WHITE : COLORS.BLACK;
+                            const gameId = `game_${Date.now()}_${playerIds[0].substring(0, 8)}_${playerIds[1].substring(0, 8)}`;
                             
-                            // Wait for next poll cycle to let both players see matched state
-                            console.log('Chess: Both players set to matched, waiting for next poll cycle');
-                            needsUpdate = false; // Don't update again since we just updated
+                            // Stop polling immediately and set state to prevent further polling
+                            this.isSearching = false;
+                            this.gameState = 'playing';
+                            if (this.matchmakingInterval) {
+                                clearInterval(this.matchmakingInterval);
+                                this.matchmakingInterval = null;
+                            }
+                            
+                            // Set up handshake tracking
+                            this.gameStartHandshake.opponentId = potentialOpponentId;
+                            this.gameStartHandshake.gameId = gameId;
+                            
+                            // Start the game locally
+                            this.startGame(gameId, potentialOpponentId, myColor);
+                            
+                            // Send handshake confirmation
+                            await this.sendGameStartConfirmation(potentialOpponentId, gameId);
+                            
+                            // Start move polling for fallback
+                            this.startReducedMovePolling();
+                            
                             return;
                         } else {
-                            // Peer doesn't exist in our DHT - they're a stale entry! Clean it up.
+                            // Peer doesn't exist - remove stale entry
                             console.log('Chess: Peer not found in DHT peer list - removing stale entry:', potentialOpponentId.substring(0, 8));
                             delete matchmakingState[potentialOpponentId];
                             needsUpdate = true;
@@ -1488,76 +1760,216 @@ export class ChessModule {
                         matchmakingState[this.dht.nodeId].timestamp = now;
                         needsUpdate = true;
                     }
-                } else {
-                    // Unknown state - reset to searching
-                    console.log('Chess: Unknown state detected, resetting to searching');
-                    matchmakingState[this.dht.nodeId].state = 'searching';
-                    matchmakingState[this.dht.nodeId].timestamp = now;
-                    needsUpdate = true;
                 }
 
                 // Update the state if needed
                 if (needsUpdate) {
-                    await this.dht.put(GAME_CONFIG.MATCHMAKING_KEY, JSON.stringify(matchmakingState));
+                    await this.robustDHTOperation('put', GAME_CONFIG.MATCHMAKING_KEY, JSON.stringify(matchmakingState));
                 }
 
             } catch (err) {
                 console.error('Chess: Error during simple matchmaking polling:', err);
+                // Don't stop polling on network errors - retry on next cycle
             }
-        }, 2000); // Poll every 2 seconds
+        }, 4000); // Poll every 4 seconds for better reliability
+    }
+
+    async getMatchmakingStateWithRetry(maxRetries = 3, delay = 1000) {
+        // Get matchmaking state from DHT with retry logic
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                const data = await this.robustDHTOperation('get', GAME_CONFIG.MATCHMAKING_KEY);
+                if (data) {
+                    const parsed = JSON.parse(data);
+                    return typeof parsed === 'object' && parsed !== null ? parsed : {};
+                } else {
+                    return {};
+                }
+            } catch (err) {
+                console.error(`Chess: Failed to get matchmaking state (attempt ${attempt + 1}/${maxRetries}):`, err);
+                if (attempt === maxRetries - 1) {
+                    console.warn('Chess: All attempts failed, returning empty state');
+                    return {};
+                }
+                
+                // Wait before retry
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+
+    async updateMatchmakingStateWithRetry(stateUpdate, maxRetries = 3, delay = 1000) {
+        // Update matchmaking state in DHT with retry logic
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                // Get current state
+                let currentState = await this.getMatchmakingStateWithRetry(1, 0);
+                
+                // Apply updates
+                Object.assign(currentState, stateUpdate);
+                
+                // Save back to DHT
+                await this.robustDHTOperation('put', GAME_CONFIG.MATCHMAKING_KEY, JSON.stringify(currentState));
+                
+                console.log('Chess: Matchmaking state updated successfully');
+                return true;
+            } catch (err) {
+                console.error(`Chess: Failed to update matchmaking state (attempt ${attempt + 1}/${maxRetries}):`, err);
+                if (attempt === maxRetries - 1) {
+                    console.error('Chess: All attempts failed to update matchmaking state');
+                    return false;
+                }
+                
+                // Wait before retry
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+
+    /**
+     * Monitor peer connectivity for debugging
+     */
+    monitorPeerConnectivity() {
+        if (!this.opponentId || !this.dht || !this.dht.peers) {
+            return;
+        }
+
+        const opponent = this.dht.peers.get(this.opponentId);
+        const isConnected = opponent && opponent.connected;
+        
+        // Only log connectivity changes to reduce spam
+        if (this.lastOpponentConnectedState !== isConnected) {
+            console.log(`Chess: Opponent connectivity changed: ${isConnected ? 'connected' : 'disconnected'}`);
+            this.lastOpponentConnectedState = isConnected;
+        }
+    }
+
+    endGame(message) {
+        console.log('Chess: Ending game -', message);
+        
+        // Stop the timer
+        if (this.gameTimer && this.gameTimer.interval) {
+            clearInterval(this.gameTimer.interval);
+            this.gameTimer.interval = null;
+        }
+        
+        // Clear all polling intervals
+        if (this.movePollingInterval) {
+            clearInterval(this.movePollingInterval);
+            this.movePollingInterval = null;
+        }
+        if (this.matchmakingInterval) {
+            clearInterval(this.matchmakingInterval);
+            this.matchmakingInterval = null;
+        }
+        
+        // Clear handshake timeout
+        if (this.handshakeTimeout) {
+            clearTimeout(this.handshakeTimeout);
+            this.handshakeTimeout = null;
+        }
+        
+        // Reset game state variables - FIX: Clear gameId and opponentId
+        this.gameState = 'ended';
+        this.isSearching = false;
+        // Reset pending draw offer flag when game ends
+        this.pendingDrawOffer = false;
+        
+        // Keep gameId and opponentId for a short time to allow rematch, then clear them
+        setTimeout(() => {
+            if (this.gameState === 'ended') {
+                console.log('Chess: Clearing game session data after game end');
+                this.gameId = null;
+                this.opponentId = null;
+                this.playerColor = null;
+                this.gameState = 'disconnected';
+                this.updateConnectionState();
+            }
+        }, 30000); // Clear after 30 seconds to allow time for rematch
+        
+        // Update UI with better messaging
+        if (this.ui && this.ui.chessGameStatus) {
+            this.ui.chessGameStatus.textContent = message;
+        }
+        
+        // Update connection state to refresh all buttons and displays
+        this.updateConnectionState();
+        
+        console.log('Chess: Game ended successfully');
     }
 
     startGame(gameId, opponentId, playerColor) {
-        console.log('Chess: Starting game with ID:', gameId, 'Opponent:', opponentId?.substring(0, 8), 'My color:', playerColor);
+        console.log('Chess: Starting new game', { gameId, opponentId: opponentId.substring(0, 8), playerColor });
         
         // Set game state
         this.gameId = gameId;
         this.opponentId = opponentId;
         this.playerColor = playerColor;
         this.gameState = 'playing';
-        
-        // Initialize/force UI if needed (handles cases where chess tab wasn't active at game start)
-        this.initializeUI();
-        
-        // Start the chess engine
-        this.engine.startGame();
-        
-        // Update the board display
-        this.updateBoard();
-        
-        // Update game state display
-        this.updateGameState();
-        
-        // Start game timer
-        this.startGameTimer();
-        
-        // Update connection state
-        this.updateConnectionState();
-        
-        // Store initial game state in DHT
-        this.storeGameState();
-        
-        console.log('Chess: Game setup complete. Game state:', this.gameState, 'Player color:', this.playerColor);
-    }
-
-    endGame(message) {
-        console.log('Chess: Game ended:', message);
-        
-        // Stop the game timer
-        this.stopGameTimer();
-        
-        // Immediately set state to prevent any ongoing operations
-        this.gameState = 'ended';
         this.isSearching = false;
         
-        // Clear game data
-        const oldGameId = this.gameId;
-        const oldOpponentId = this.opponentId;
-        this.gameId = null;
-        this.opponentId = null;
-        this.playerColor = null;
+        // Initialize game tracking
+        this.processedGossipMoves = new Set();
+        this.processedGameActions = new Set();
         
-        // Clear any polling intervals
+        // Clear matchmaking polling
+        if (this.matchmakingInterval) {
+            clearInterval(this.matchmakingInterval);
+            this.matchmakingInterval = null;
+        }
+        
+        // Initialize chess engine
+        this.engine.reset();
+        
+               
+        // Initialize timer system
+        this.timeLeft = {
+            white: GAME_CONFIG.TIME_CONTROL,
+            black: GAME_CONFIG.TIME_CONTROL
+        };
+        this.gameTimer = {
+            currentPlayer: COLORS.WHITE, // White always starts
+            interval: null
+        };
+        this.lastMoveTime = Date.now();
+        
+        // Start the timer for the first move (White)
+        this.switchPlayerTimer();
+        
+        // Initialize UI if not already done
+        if (!this.uiInitialized) {
+            this.initializeUI();
+        }
+        
+        // Update UI state
+        this.updateConnectionState();
+        this.updateGameState(); // Use the proper updateGameState method
+        
+        if (this.ui && this.ui.searchStatus) {
+            this.ui.searchStatus.style.display = 'none';
+        }
+        if (this.ui && this.ui.findGameBtn) {
+            this.ui.findGameBtn.style.display = 'none';
+        }
+        
+        // Update board
+        this.createBoard();
+        this.updateBoard();
+        
+        console.log('Chess: Game started successfully with timer initialized');
+    }
+
+    /**
+     * Immediately reset game state to allow starting a new game
+     */
+    resetGameState() {
+        console.log('Chess: Resetting game state for new game');
+        
+        // Clear all intervals
+        if (this.gameTimer && this.gameTimer.interval) {
+            clearInterval(this.gameTimer.interval);
+            this.gameTimer.interval = null;
+        }
         if (this.movePollingInterval) {
             clearInterval(this.movePollingInterval);
             this.movePollingInterval = null;
@@ -1571,7 +1983,16 @@ export class ChessModule {
             this.handshakeTimeout = null;
         }
         
-        // Reset handshake state
+        // Reset all game variables
+        this.gameId = null;
+        this.opponentId = null;
+        this.playerColor = null;
+        this.gameState = 'disconnected';
+        this.isSearching = false;
+        
+        // Reset game tracking
+        this.processedGossipMoves = new Set();
+        this.processedGameActions = new Set();
         this.gameStartHandshake = {
             sentConfirmation: false,
             receivedConfirmation: false,
@@ -1579,82 +2000,236 @@ export class ChessModule {
             gameId: null
         };
         
-        // Clear processed gossip moves
-        this.processedGossipMoves.clear();
+        // Update UI
+        this.updateConnectionState();
         
-        // Reset logging flags for next game
-        this.hasLoggedGetKeysError = false;
-        this.hasLoggedNoGetKeys = false;
-        this.lastOpponentConnectedState = null;
+        console.log('Chess: Game state reset complete');
+    }
+
+    updateGameState() {
+        // Update UI elements based on current game state
+        if (!this.ui) return;
         
-        console.log('Chess: Cleaned up game state. Previous game:', oldGameId, 'Previous opponent:', oldOpponentId?.substring(0, 8));
-        
-        // Update UI if available
-        if (this.uiInitialized && this.ui) {
-            // Show game end message
-            if (this.ui.chessGameStatus) {
-                this.ui.chessGameStatus.textContent = message;
-            }
-            
-            // Show rematch button
-            if (this.ui.rematchBtn) {
-                this.ui.rematchBtn.style.display = 'inline-block';
-            }
-            
-            // Disable game action buttons
-            if (this.ui.resignBtn) {
-                this.ui.resignBtn.disabled = true;
-            }
-            if (this.ui.drawBtn) {
-                this.ui.drawBtn.disabled = true;
+        // Update game status text - FIX: Use correct UI element name
+        if (this.ui.chessGameStatus) {
+            if (this.gameState === 'playing' && this.engine) {
+                const currentPlayerText = this.engine.currentPlayer === this.playerColor ? "Your" : "Opponent's";
+                let statusText = `Playing as ${this.playerColor}. ${currentPlayerText} turn.`;
+                
+                // Add check or checkmate status
+                if (this.engine.gameState === GAME_STATES.CHECK) {
+                    statusText += " (Check!)";
+                } else if (this.engine.gameState === GAME_STATES.CHECKMATE) {
+                    const winner = this.engine.currentPlayer === COLORS.WHITE ? 'Black' : 'White';
+                    statusText = `Game Over - ${winner} wins by checkmate!`;
+                } else if (this.engine.gameState === GAME_STATES.STALEMATE) {
+                    statusText = "Game Over - Stalemate (Draw)";
+                }
+                
+                this.ui.chessGameStatus.textContent = statusText;
+            } else if (this.gameState === 'searching') {
+                this.ui.chessGameStatus.textContent = 'Searching for opponents...';
+            } else if (this.gameState === 'ended') {
+                // Keep the end game message that was set
+            } else {
+                this.ui.chessGameStatus.textContent = 'Not connected';
             }
         }
         
-        // Update connection state to reflect that game has ended
-        this.updateConnectionState();
+        // Update timer displays if they exist - FIX: Use correct UI element names
+
+        if (this.ui.whiteTime && this.ui.blackTime && this.timeLeft) {
+            const formatTime = (ms) => {
+                const minutes = Math.floor(ms / 60000);
+                const seconds = Math.floor((ms % 60000) / 1000);
+                return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            };
+            
+            this.ui.whiteTime.textContent = formatTime(this.timeLeft.white || 0);
+            this.ui.blackTime.textContent = formatTime(this.timeLeft.black || 0);
+        }
         
-        // Reset state back to disconnected after a brief delay to allow UI updates
-        setTimeout(() => {
-            if (this.gameState === 'ended') {
-                this.gameState = 'disconnected';
-                console.log('Chess: State reset to disconnected after game end');
-            }
-        }, 1000);
-        
-        // Could also show a modal or notification here
-        alert(message);
+        // Update player names if available
+        if (this.ui.whitePlayer && this.ui.blackPlayer && this.gameState === 'playing') {
+            const whitePlayerName = this.playerColor === COLORS.WHITE ? 'You' : 'Opponent';
+            const blackPlayerName = this.playerColor === COLORS.BLACK ? 'You' : 'Opponent';
+            this.ui.whitePlayer.textContent = whitePlayerName;
+            this.ui.blackPlayer.textContent = blackPlayerName;
+        }
     }
 
-    // UI Action Methods
-
-    cancelSearch() {
-        console.log('Chess: Canceling search');
+    updateMoveHistory() {
+        // Update move history display
+        if (!this.ui || !this.ui.moveHistory || !this.engine) return;
         
-        if (!this.isSearching) {
-            console.log('Chess: Not currently searching');
+        this.ui.moveHistory.innerHTML = '';
+        
+        if (this.engine.moveHistory && this.engine.moveHistory.length > 0) {
+            // Group moves in pairs (white move + black move)
+            for (let i = 0; i < this.engine.moveHistory.length; i += 2) {
+                const moveElement = document.createElement('div');
+                moveElement.className = 'move-pair';
+                
+                const moveNumber = Math.floor(i / 2) + 1;
+                let moveText = `${moveNumber}.`;
+                
+                // White move (always exists for each pair)
+                const whiteMove = this.engine.moveHistory[i];
+                try {
+                    const whiteNotation = this.engine.getAlgebraicNotation(whiteMove);
+                    moveText += ` ${whiteNotation}`;
+                } catch (err) {
+                    console.warn('Chess: Failed to generate algebraic notation for white move, falling back:', err);
+                    moveText += ` ${this.getFallbackNotation(whiteMove)}`;
+                }
+                
+                // Black move (might not exist if it's the last move and white just moved)
+                const blackMove = this.engine.moveHistory[i + 1];
+                if (blackMove) {
+                    try {
+                        const blackNotation = this.engine.getAlgebraicNotation(blackMove);
+                        moveText += ` ${blackNotation}`;
+                    } catch (err) {
+                        console.warn('Chess: Failed to generate algebraic notation for black move, falling back:', err);
+                        moveText += ` ${this.getFallbackNotation(blackMove)}`;
+                    }
+                }
+                
+                moveElement.textContent = moveText;
+                this.ui.moveHistory.appendChild(moveElement);
+            }
+            
+            // Scroll to bottom to show latest move
+            this.ui.moveHistory.scrollTop = this.ui.moveHistory.scrollHeight;
+        } else {
+            const emptyMessage = document.createElement('div');
+            emptyMessage.className = 'no-moves';
+            emptyMessage.textContent = 'No moves yet';
+            this.ui.moveHistory.appendChild(emptyMessage);
+        }
+    }
+
+    getFallbackNotation(move) {
+        // Helper method to generate simple fallback notation
+        let fromRow, fromCol, toRow, toCol;
+        
+        if (move.from && Array.isArray(move.from) && move.to && Array.isArray(move.to)) {
+            [fromRow, fromCol] = move.from;
+            [toRow, toCol] = move.to;
+        } else {
+            fromRow = move.fromRow || 0;
+            fromCol = move.fromCol || 0;
+            toRow = move.toRow || 0;
+            toCol = move.toCol || 0;
+        }
+        
+        const from = `${String.fromCharCode(97 + fromCol)}${8 - fromRow}`;
+        const to = `${String.fromCharCode(97 + toCol)}${8 - toRow}`;
+        return `${from}-${to}`;
+    }
+
+    switchPlayerTimer() {
+        // Switch the game timer to the next player
+        console.log('Chess: Switching player timer to:', this.engine.currentPlayer);
+        
+        if (this.gameState !== 'playing') {
+            console.log('Chess: Not switching timer - game not playing');
             return;
         }
         
-        // Stop matchmaking polling
+        // Initialize timer system if not already done
+        if (!this.gameTimer) {
+            this.gameTimer = {
+                currentPlayer: this.engine.currentPlayer,
+                interval: null
+            };
+        }
+        
+        // Initialize time tracking if not already done
+        if (!this.timeLeft) {
+            this.timeLeft = {
+                white: GAME_CONFIG.TIME_CONTROL,
+                black: GAME_CONFIG.TIME_CONTROL
+            };
+        }
+        
+        // Stop current timer
+        if (this.gameTimer.interval) {
+            clearInterval(this.gameTimer.interval);
+            this.gameTimer.interval = null;
+        }
+        
+        // Record time spent by previous player (if there was one)
+        if (this.lastMoveTime && this.gameTimer.currentPlayer) {
+            const timeSpent = Date.now() - this.lastMoveTime;
+            this.timeLeft[this.gameTimer.currentPlayer] = Math.max(0, this.timeLeft[this.gameTimer.currentPlayer] - timeSpent);
+            console.log('Chess: Time spent by', this.gameTimer.currentPlayer, ':', timeSpent, 'ms. Remaining:', this.timeLeft[this.gameTimer.currentPlayer]);
+        }
+        
+        // Switch to current player
+        this.gameTimer.currentPlayer = this.engine.currentPlayer;
+        this.lastMoveTime = Date.now();
+        
+        // Update UI immediately
+        this.updateGameState();
+        
+        // Start timer for current player
+        this.gameTimer.interval = setInterval(() => {
+            if (this.gameState !== 'playing') {
+                clearInterval(this.gameTimer.interval);
+                this.gameTimer.interval = null;
+                return;
+            }
+            
+            // Subtract one second from current player's time
+            this.timeLeft[this.gameTimer.currentPlayer] = Math.max(0, this.timeLeft[this.gameTimer.currentPlayer] - 1000);
+            
+            // Update UI
+            this.updateGameState();
+            
+            // Check for time out
+            if (this.timeLeft[this.gameTimer.currentPlayer] <= 0) {
+                clearInterval(this.gameTimer.interval);
+                this.gameTimer.interval = null;
+                const winner = this.gameTimer.currentPlayer === COLORS.WHITE ? 'Black' : 'White';
+                this.endGame(`${winner} wins by timeout!`);
+            }
+        }, 1000);
+        
+        console.log('Chess: Timer started for', this.gameTimer.currentPlayer, 'with', this.timeLeft[this.gameTimer.currentPlayer], 'ms remaining');
+    }
+
+    async cancelSearch() {
+        console.log('Chess: Canceling search');
+        
+        this.isSearching = false;
+        this.gameState = 'disconnected';
+        
+        // Clear any polling intervals
         if (this.matchmakingInterval) {
             clearInterval(this.matchmakingInterval);
             this.matchmakingInterval = null;
         }
         
-        // Reset state
-        this.isSearching = false;
-        this.gameState = 'disconnected';
+        // Remove ourselves from matchmaking state
+        try {
+            let matchmakingState = await this.getMatchmakingStateWithRetry(1, 100);
+            if (matchmakingState && matchmakingState[this.dht.nodeId]) {
+                delete matchmakingState[this.dht.nodeId];
+                await this.robustDHTOperation('put', GAME_CONFIG.MATCHMAKING_KEY, JSON.stringify(matchmakingState));
+                console.log('Chess: Removed from matchmaking state');
+            }
+        } catch (err) {
+            console.error('Chess: Error removing from matchmaking state:', err);
+        }
         
         // Update UI
         this.updateConnectionState();
-        if (this.ui && this.ui.searchStatus) {
-            this.ui.searchStatus.style.display = 'none';
-        }
         
-        console.log('Chess: Search canceled');
+        console.log('Chess: Search canceled successfully');
     }
 
-    resign() {
+    async resign() {
         console.log('Chess: Player resigned');
         
         if (this.gameState !== 'playing') {
@@ -1662,426 +2237,255 @@ export class ChessModule {
             return;
         }
         
-        // Send resignation to opponent
-        this.sendGameAction('resign');
+        // Confirm resignation with modal
+        const confirmResign = await this.showModal(
+            'Resign Game', 
+            'Are you sure you want to resign? This will end the game.',
+            'Resign',
+            'Cancel'
+        );
         
-        // End the game locally
-        this.endGame('You resigned. Opponent wins!');
+        if (!confirmResign) {
+            console.log('Chess: Resignation cancelled by user');
+            return;
+        }
+        
+        // Send resignation to opponent
+        const success = await this.sendGameAction('resign');
+        
+        if (success) {
+            console.log('Chess: Resignation sent successfully');
+        } else {
+            console.error('Chess: Failed to send resignation, but ending game anyway');
+        }
+        
+        // End the game
+        this.endGame('You resigned - Opponent wins!');
     }
 
-    offerDraw() {
-        console.log('Chess: Player offered draw');
+    async offerDraw() {
+        console.log('Chess: Offering draw');
         
         if (this.gameState !== 'playing') {
             console.log('Chess: Cannot offer draw - not in active game');
             return;
         }
         
+        if (this.pendingDrawOffer) {
+            console.log('Chess: Draw offer already pending - ignoring additional clicks');
+            return;
+        }
+        
+        // Set flag to prevent multiple draw offers
+        this.pendingDrawOffer = true;
+        
         // Send draw offer to opponent
-        this.sendGameAction('draw_offer');
+        const success = await this.sendGameAction('draw_offer');
         
-        // Show confirmation to player
-        if (this.ui && this.ui.chessGameStatus) {
-            this.ui.chessGameStatus.textContent = 'Draw offer sent to opponent...';
-        }
-        
-        console.log('Chess: Draw offer sent');
-    }
-
-    requestRematch() {
-        console.log('Chess: Player requested rematch');
-        
-        if (this.gameState !== 'ended') {
-            console.log('Chess: Cannot request rematch - game not ended');
-            return;
-        }
-        
-        // Send rematch request to opponent if we have their ID
-        if (this.opponentId) {
-            this.sendGameAction('rematch_request');
-        }
-        
-        // Start searching for a new game
-        this.findGame();
-        
-        console.log('Chess: Rematch requested and new game search started');
-    }
-
-    updateGameState() {
-        // Only update UI if elements are available (chess tab is active and UI is initialized)
-        if (!this.uiInitialized || !this.ui) {
-            console.log('Chess: Skipping updateGameState - UI not initialized');
-            // Still try to update some critical elements directly if they exist
-            const gameStatusElement = document.getElementById('chessGameStatus');
-            if (gameStatusElement && this.gameState) {
-                let statusText = 'No game active';
-                if (this.gameState === 'searching') {
-                    statusText = 'Searching for opponent...';
-                } else if (this.gameState === 'playing') {
-                    const currentTurn = this.engine?.currentPlayer === COLORS.WHITE ? 'White' : 'Black';
-                    const isMyTurn = this.engine?.currentPlayer === this.playerColor;
-                    statusText = `Game active - ${currentTurn}'s turn${isMyTurn ? ' (You)' : ''}`;
-                } else if (this.gameState === 'ended') {
-                    statusText = 'Game ended';
-                }
-                gameStatusElement.textContent = statusText;
+        if (success) {
+            console.log('Chess: Draw offer sent successfully');
+            // Update UI to show draw offer sent - FIX: Use correct UI element name
+            if (this.ui && this.ui.chessGameStatus) {
+                this.ui.chessGameStatus.textContent = 'Draw offer sent to opponent...';
             }
-            return;
-        }
-
-        // Update game status display
-        if (this.ui.chessGameStatus) {
-            let statusText = 'No game active';
-            
-            if (this.gameState === 'searching') {
-                statusText = 'Searching for opponent...';
-            } else if (this.gameState === 'playing') {
-                const currentTurn = this.engine?.currentPlayer === COLORS.WHITE ? 'White' : 'Black';
-                const isMyTurn = this.engine?.currentPlayer === this.playerColor;
-                statusText = `Game active - ${currentTurn}'s turn${isMyTurn ? ' (You)' : ''}`;
-            } else if (this.gameState === 'ended') {
-                statusText = 'Game ended';
-            }
-            
-            this.ui.chessGameStatus.textContent = statusText;
-        }
-        
-        // Update player names
-        if (this.ui.whitePlayer && this.ui.blackPlayer) {
-            const myId = this.dht?.nodeId?.substring(0, 8) || 'You';
-            const opponentId = this.opponentId?.substring(0, 8) || 'Opponent';
-            
-            if (this.playerColor === COLORS.WHITE) {
-                this.ui.whitePlayer.textContent = myId;
-                this.ui.blackPlayer.textContent = this.opponentId ? opponentId : '-';
-            } else if (this.playerColor === COLORS.BLACK) {
-                this.ui.whitePlayer.textContent = this.opponentId ? opponentId : '-';
-                this.ui.blackPlayer.textContent = myId;
-            } else {
-                this.ui.whitePlayer.textContent = '-';
-                this.ui.blackPlayer.textContent = '-';
-            }
-        }
-        
-        // Update button states
-        if (this.ui.resignBtn) {
-            this.ui.resignBtn.disabled = this.gameState !== 'playing';
-        }
-        if (this.ui.drawBtn) {
-            this.ui.drawBtn.disabled = this.gameState !== 'playing';
-        }
-        if (this.ui.rematchBtn) {
-            this.ui.rematchBtn.style.display = this.gameState === 'ended' ? 'inline-block' : 'none';
-        }
-        
-        // Update timer display
-        this.updateTimerDisplay();
-        
-        console.log('Chess: Game state updated');
-    }
-
-    updateMoveHistory() {
-        console.log('Chess: updateMoveHistory called');
-        
-        // Only update UI if elements are available
-        if (!this.uiInitialized || !this.ui || !this.ui.moveHistory) {
-            console.log('Chess: Skipping updateMoveHistory - UI not available:', {
-                uiInitialized: this.uiInitialized,
-                hasUI: !!this.ui,
-                hasMoveHistory: !!this.ui?.moveHistory
-            });
-            
-            // Try to find the move history element directly
-            const moveHistoryElement = document.getElementById('moveHistory');
-            if (moveHistoryElement) {
-                console.log('Chess: Found move history element, updating UI cache');
-                this.ui = this.ui || {};
-                this.ui.moveHistory = moveHistoryElement;
-            } else {
-                console.log('Chess: Move history element not found in DOM');
-                return;
-            }
-        }
-
-        console.log('Chess: Updating move history, current moves:', this.engine?.moveHistory?.length || 0);
-
-        // Clear previous history
-        this.ui.moveHistory.innerHTML = '';
-
-        if (!this.engine || !this.engine.moveHistory || this.engine.moveHistory.length === 0) {
-            this.ui.moveHistory.innerHTML = '<p>No moves yet</p>';
-            console.log('Chess: No moves to display');
-            return;
-        }
-
-        // Build move history with proper formatting
-        const movePairs = [];
-        
-        for (let i = 0; i < this.engine.moveHistory.length; i += 2) {
-            const moveNumber = Math.floor(i / 2) + 1;
-            const whiteMove = this.engine.moveHistory[i];
-            const blackMove = this.engine.moveHistory[i + 1];
-            
-            // Generate proper algebraic notation
-            const whiteNotation = whiteMove ? this.generateMoveNotation(whiteMove) : '';
-            const blackNotation = blackMove ? this.generateMoveNotation(blackMove) : '';
-            
-            // Create the move pair element
-            const movePairDiv = document.createElement('div');
-            movePairDiv.className = 'chess-move-pair';
-            
-            let moveText = `<span class="chess-move-number">${moveNumber}.</span> `;
-            moveText += `<span class="chess-white-move">${whiteNotation}</span>`;
-            
-            if (blackNotation) {
-                moveText += ` <span class="chess-black-move">${blackNotation}</span>`;
-            }
-            
-            movePairDiv.innerHTML = moveText;
-            this.ui.moveHistory.appendChild(movePairDiv);
-        }
-        
-        // Scroll to bottom to show latest moves
-        this.ui.moveHistory.scrollTop = this.ui.moveHistory.scrollHeight;
-        
-        console.log('Chess: Move history updated with', this.engine.moveHistory.length, 'moves');
-    }
-
-    /**
-     * Generate algebraic notation for a chess move
-     * @param {Object} move - The move object from the chess engine
-     * @returns {string} - The move in algebraic notation (e.g., "e4", "Nf3", "O-O")
-     */
-    generateMoveNotation(move) {
-        if (!move) return '';
-        
-        try {
-            // Temporary debug logging to fix NaN issue
-            if (move && (isNaN(move.fromRow) || isNaN(move.fromCol) || isNaN(move.toRow) || isNaN(move.toCol))) {
-                console.log('Chess: DEBUG - Move object structure:', move);
-                console.log('Chess: DEBUG - Move coordinates:', {
-                    fromRow: move.fromRow,
-                    fromCol: move.fromCol,
-                    toRow: move.toRow,
-                    toCol: move.toCol,
-                    from: move.from,
-                    to: move.to
-                });
-            }
-            
-            // Handle castling moves
-            if (move.castling) {
-                return move.castling === 'kingside' ? 'O-O' : 'O-O-O';
-            }
-            
-            // Get coordinates - handle different possible formats
-            let fromRow, fromCol, toRow, toCol;
-            
-            if (typeof move.fromRow !== 'undefined' && typeof move.fromCol !== 'undefined' &&
-                typeof move.toRow !== 'undefined' && typeof move.toCol !== 'undefined') {
-                // Direct properties
-                fromRow = move.fromRow;
-                fromCol = move.fromCol;
-                toRow = move.toRow;
-                toCol = move.toCol;
-            } else if (move.from && move.to) {
-                // Array format
-                if (Array.isArray(move.from) && Array.isArray(move.to)) {
-                    [fromRow, fromCol] = move.from;
-                    [toRow, toCol] = move.to;
-                } else if (typeof move.from === 'object' && typeof move.to === 'object') {
-                    // Object format
-                    fromRow = move.from.row || move.from.r || move.from[0];
-                    fromCol = move.from.col || move.from.c || move.from[1];
-                    toRow = move.to.row || move.to.r || move.to[0];
-                    toCol = move.to.col || move.to.c || move.to[1];
-                }
-            }
-            
-            // Validate coordinates
-            if (isNaN(fromRow) || isNaN(fromCol) || isNaN(toRow) || isNaN(toCol)) {
-                console.error('Chess: Invalid coordinates in move:', { fromRow, fromCol, toRow, toCol, move });
-                return `Move-${Date.now()}`; // Fallback to timestamp
-            }
-            
-            // Get piece type (empty for pawns)
-            const pieceType = move.piece?.type || move.pieceType;
-            let notation = '';
-            
-            // Add piece symbol (except for pawns)
-            if (pieceType && pieceType !== 'pawn') {
-                const pieceSymbols = {
-                    'king': 'K',
-                    'queen': 'Q', 
-                    'rook': 'R',
-                    'bishop': 'B',
-                    'knight': 'N'
-                };
-                notation += pieceSymbols[pieceType] || '';
-            }
-            
-            // Handle pawn captures
-            if (pieceType === 'pawn' && (move.captured || move.isCapture)) {
-                // Add file of departure for pawn captures
-                notation += String.fromCharCode(97 + fromCol); // 'a' + column
-            }
-            
-            // Add capture symbol
-            if (move.captured || move.isCapture) {
-                notation += 'x';
-            }
-            
-            // Add destination square
-            const fileChar = String.fromCharCode(97 + toCol); // 'a' + column
-            const rankChar = String(8 - toRow); // Convert row to rank
-            notation += fileChar + rankChar;
-            
-            // Handle pawn promotion
-            if (move.promotion) {
-                const promotionSymbols = {
-                    'queen': 'Q',
-                    'rook': 'R', 
-                    'bishop': 'B',
-                    'knight': 'N'
-                };
-                notation += '=' + (promotionSymbols[move.promotion] || 'Q');
-            }
-            
-            // Add check/checkmate indicators (if available from engine)
-            if (move.check) {
-                notation += '+';
-            } else if (move.checkmate) {
-                notation += '#';
-            }
-            
-            return notation;
-            
-        } catch (err) {
-            console.error('Chess: Error generating move notation:', err, move);
-            // Fallback to simple coordinate notation if we have valid coordinates
-            if (!isNaN(move.fromRow) && !isNaN(move.fromCol) && !isNaN(move.toRow) && !isNaN(move.toCol)) {
-                const fromFile = String.fromCharCode(97 + move.fromCol);
-                const fromRank = String(8 - move.fromRow);
-                const toFile = String.fromCharCode(97 + move.toCol);
-                const toRank = String(8 - move.toRow);
-                return `${fromFile}${fromRank}-${toFile}${toRank}`;
-            }
-            return `Move-${Date.now()}`; // Ultimate fallback
-        }
-    }
-
-    // Timer management methods
-
-    startGameTimer() {
-        if (this.gameTimer) {
-            clearInterval(this.gameTimer);
-        }
-
-        console.log('Chess: Starting game timer');
-        this.lastMoveTime = Date.now();
-        
-        this.gameTimer = setInterval(() => {
-            this.updateGameTimer();
-        }, 1000); // Update every second
-    }
-
-    stopGameTimer() {
-        if (this.gameTimer) {
-            clearInterval(this.gameTimer);
-            this.gameTimer = null;
-            console.log('Chess: Game timer stopped');
-        }
-    }
-
-    updateGameTimer() {
-        if (!this.engine || this.gameState !== 'playing') {
-            return;
-        }
-
-        const now = Date.now();
-        const elapsed = now - this.lastMoveTime;
-        const currentPlayer = this.engine.currentPlayer;
-        
-        // Deduct time from current player
-        if (currentPlayer === COLORS.WHITE) {
-            this.timeLeft.white = Math.max(0, this.timeLeft.white - elapsed);
         } else {
-            this.timeLeft.black = Math.max(0, this.timeLeft.black - elapsed);
-        }
-        
-        this.lastMoveTime = now;
-        
-        // Update UI
-        this.updateTimerDisplay();
-        
-        // Check for time out
-        if (this.timeLeft.white <= 0) {
-            this.endGame('White ran out of time. Black wins!');
-        } else if (this.timeLeft.black <= 0) {
-            this.endGame('Black ran out of time. White wins!');
+            console.error('Chess: Failed to send draw offer');
+            if (this.ui && this.ui.chessGameStatus) {
+                this.ui.chessGameStatus.textContent = 'Failed to send draw offer';
+            }
+            // Reset flag if sending failed
+            this.pendingDrawOffer = false;
         }
     }
 
-    updateTimerDisplay() {
-        if (!this.ui || !this.ui.whiteTime || !this.ui.blackTime) {
+    async requestRematch() {
+        console.log('Chess: Requesting rematch');
+        
+        if (!this.opponentId) {
+            console.log('Chess: Cannot request rematch - no opponent');
             return;
         }
-
-        this.ui.whiteTime.textContent = this.formatTime(this.timeLeft.white);
-        this.ui.blackTime.textContent = this.formatTime(this.timeLeft.black);
         
-        // Add visual indicators for whose turn it is
-        const isWhiteTurn = this.engine?.currentPlayer === COLORS.WHITE;
+        // Send rematch request to opponent
+        const success = await this.sendGameAction('rematch_request');
         
-        if (this.ui.whiteTime.parentElement) {
-            this.ui.whiteTime.parentElement.classList.toggle('active-turn', isWhiteTurn);
+        if (success) {
+            console.log('Chess: Rematch request sent successfully');
+            // Update UI to show rematch request sent - FIX: Use correct UI element name
+            if (this.ui && this.ui.chessGameStatus) {
+                this.ui.chessGameStatus.textContent = 'Rematch request sent to opponent...';
+            }
+        } else {
+            console.error('Chess: Failed to send rematch request');
+            if (this.ui && this.ui.chessGameStatus) {
+                this.ui.chessGameStatus.textContent = 'Failed to send rematch request';
+            }
         }
-        if (this.ui.blackTime.parentElement) {
-            this.ui.blackTime.parentElement.classList.toggle('active-turn', !isWhiteTurn);
-        }
-    }
-
-    formatTime(milliseconds) {
-        const totalSeconds = Math.ceil(milliseconds / 1000);
-        const minutes = Math.floor(totalSeconds / 60);
-        const seconds = totalSeconds % 60;
-        return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-    }
-
-    switchPlayerTimer() {
-        // Reset the timer for the new current player
-        this.lastMoveTime = Date.now();
-        this.updateTimerDisplay();
-        console.log('Chess: Timer switched to', this.engine?.currentPlayer);
     }
 
     /**
-     * Monitor and log peer connectivity for debugging purposes
+     * Create and show a modal dialog
+     * @param {string} title - Modal title
+     * @param {string} message - Modal message
+     * @param {string} confirmText - Text for confirm button (default: "Yes")
+     * @param {string} cancelText - Text for cancel button (default: "No")
+     * @returns {Promise<boolean>} - Resolves to true if confirmed, false if canceled
      */
-    monitorPeerConnectivity() {
-        if (!this.opponentId || !this.dht || !this.dht.peers) {
-            return;
-        }
-        
-        const opponent = this.dht.peers.get(this.opponentId);
-        const opponentShortId = this.opponentId.substring(0, 8);
-        
-        // Only log connectivity changes, not every check
-        const isConnected = opponent?.connected || false;
-        if (this.lastOpponentConnectedState !== isConnected) {
-            this.lastOpponentConnectedState = isConnected;
-            
-            if (opponent) {
-                console.log(`Chess: Opponent ${opponentShortId} peer status changed:`, {
-                    connected: opponent.connected,
-                    readyState: opponent.readyState,
-                    lastSeen: opponent.lastSeen || 'unknown'
-                });
-            } else {
-                console.log(`Chess: Opponent ${opponentShortId} not found in peer list`);
-                console.log('Chess: Available peers:', this.dht.peers.size, 
-                    Array.from(this.dht.peers.keys()).map(id => id.substring(0,  8)));
-            }
-        }
+    showModal(title, message, confirmText = "Yes", cancelText = "No") {
+        return new Promise((resolve) => {
+            // Create modal overlay
+            const overlay = document.createElement('div');
+            overlay.className = 'chess-modal-overlay';
+            overlay.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0, 0, 0, 0.7);
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                z-index: 10000;
+                font-family: Arial, sans-serif;
+            `;
+
+            // Create modal content
+            const modal = document.createElement('div');
+            modal.className = 'chess-modal';
+            modal.style.cssText = `
+                background: white;
+                border-radius: 8px;
+                padding: 24px;
+                max-width: 400px;
+                width: 90%;
+                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+                text-align: center;
+            `;
+
+            // Create title
+            const titleEl = document.createElement('h3');
+            titleEl.textContent = title;
+            titleEl.style.cssText = `
+                margin: 0 0 16px 0;
+                color: #333;
+                font-size: 18px;
+                font-weight: bold;
+            `;
+
+            // Create message
+            const messageEl = document.createElement('p');
+            messageEl.textContent = message;
+            messageEl.style.cssText = `
+                margin: 0 0 24px 0;
+                color: #666;
+                font-size: 14px;
+                line-height: 1.4;
+            `;
+
+            // Create button container
+            const buttonContainer = document.createElement('div');
+            buttonContainer.style.cssText = `
+                display: flex;
+                gap: 12px;
+                justify-content: center;
+            `;
+
+            // Create cancel button
+            const cancelBtn = document.createElement('button');
+            cancelBtn.textContent = cancelText;
+            cancelBtn.style.cssText = `
+                padding: 10px 20px;
+                border: 2px solid #ddd;
+                background: white;
+                color: #666;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 14px;
+                min-width: 80px;
+            `;
+
+            // Create confirm button
+            const confirmBtn = document.createElement('button');
+            confirmBtn.textContent = confirmText;
+            confirmBtn.style.cssText = `
+                padding: 10px 20px;
+                border: none;
+                background: #007bff;
+                color: white;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 14px;
+                min-width: 80px;
+            `;
+
+            // Add hover effects
+            cancelBtn.addEventListener('mouseenter', () => {
+                cancelBtn.style.background = '#f8f9fa';
+            });
+            cancelBtn.addEventListener('mouseleave', () => {
+                cancelBtn.style.background = 'white';
+            });
+
+            confirmBtn.addEventListener('mouseenter', () => {
+                confirmBtn.style.background = '#0056b3';
+            });
+            confirmBtn.addEventListener('mouseleave', () => {
+                confirmBtn.style.background = '#007bff';
+            });
+
+            // Add event listeners
+            const cleanup = () => {
+                if (overlay.parentNode) {
+                    overlay.parentNode.removeChild(overlay);
+                }
+            };
+
+            cancelBtn.addEventListener('click', () => {
+                cleanup();
+                resolve(false);
+            });
+
+            confirmBtn.addEventListener('click', () => {
+                cleanup();
+                resolve(true);
+            });
+
+            // Close on overlay click
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) {
+                    cleanup();
+                    resolve(false);
+                }
+            });
+
+            // Close on escape key
+            const handleKeyDown = (e) => {
+                if (e.key === 'Escape') {
+                    cleanup();
+                    document.removeEventListener('keydown', handleKeyDown);
+                    resolve(false);
+                } else if (e.key === 'Enter') {
+                    cleanup();
+                    document.removeEventListener('keydown', handleKeyDown);
+                    resolve(true);
+                }
+            };
+            document.addEventListener('keydown', handleKeyDown);
+
+            // Assemble modal
+            buttonContainer.appendChild(cancelBtn);
+            buttonContainer.appendChild(confirmBtn);
+            modal.appendChild(titleEl);
+            modal.appendChild(messageEl);
+            modal.appendChild(buttonContainer);
+            overlay.appendChild(modal);
+
+            // Add to DOM
+            document.body.appendChild(overlay);
+
+            // Focus the confirm button
+            setTimeout(() => confirmBtn.focus(), 100);
+        });
     }
 }

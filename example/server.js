@@ -1,13 +1,15 @@
 /**
- * Ultra-simple signaling server for WebDHT
- * No frills, maximum reliability
+ * HTTPS-enabled signaling server for WebDHT
+ * Required for SHA1 generation and secure development
  */
 
 import express from "express";
 import { WebSocketServer } from "ws";
+import https from "https";
 import http from "http";
 import path from "path";
 import { fileURLToPath } from "url";
+import fs from "fs";
 
 // ES modules setup
 const __filename = fileURLToPath(import.meta.url);
@@ -16,6 +18,7 @@ const __dirname = path.dirname(__filename);
 // Create Express app
 const app = express();
 const PORT = process.env.PORT || 3001;
+const HTTPS_PORT = process.env.HTTPS_PORT || 3443;
 
 // Enable JSON parsing for API endpoints
 app.use(express.json());
@@ -25,11 +28,32 @@ app.use("/", express.static(path.join(__dirname)));
 app.use("/src", express.static(path.join(__dirname, "..", "src")));
 app.use("/transports", express.static(path.join(__dirname, "..", "transports")));
 
-// Create HTTP server
-const server = http.createServer(app);
+// Try to load SSL certificates
+let httpsServer = null;
+let httpsWss = null;
 
-// Create WebSocket server for signaling
-const wss = new WebSocketServer({ server });
+try {
+    const privateKey = fs.readFileSync(path.join(__dirname, 'key.pem'), 'utf8');
+    const certificate = fs.readFileSync(path.join(__dirname, 'cert.pem'), 'utf8');
+    
+    const credentials = { key: privateKey, cert: certificate };
+    
+    // Create HTTPS server
+    httpsServer = https.createServer(credentials, app);
+    
+    // Create WebSocket server for HTTPS
+    httpsWss = new WebSocketServer({ server: httpsServer });
+    
+    console.log('✅ SSL certificates loaded successfully');
+} catch (error) {
+    console.warn('⚠️  SSL certificates not found or invalid:', error.message);
+    console.warn('   Run this command to generate certificates:');
+    console.warn('   openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/C=US/ST=CA/L=San Francisco/O=Dev/OU=Dev/CN=localhost"');
+}
+
+// Create HTTP server (fallback)
+const httpServer = http.createServer(app);
+const httpWss = new WebSocketServer({ server: httpServer });
 
 // Simple peer tracking
 const peers = new Map(); // id -> websocket
@@ -50,9 +74,9 @@ function calculateXORDistance(id1, id2) {
   return distance;
 }
 
-// Handle WebSocket connections
-wss.on("connection", (ws) => {
-  console.log("New connection");
+// WebSocket message handler (shared between HTTP and HTTPS)
+function handleWebSocketConnection(ws, req) {
+  console.log(`📞 New WebSocket connection from ${req.socket.remoteAddress}`);
   let peerId = null;
 
   ws.on("message", (message) => {
@@ -256,18 +280,31 @@ wss.on("connection", (ws) => {
           targetWs.send(signalStr);
           console.log("Signal forwarded");
           
-          // Broadcast signal event
+          // Broadcast signal event to all WebSocket servers
           const signalEvent = {
             type: 'signal_event',
             source: peerId,
             target: targetId,
             signalType: 'server'
           };
-          wss.clients.forEach(client => {
+          
+          const broadcastMessage = JSON.stringify(signalEvent);
+          
+          // Broadcast to HTTP WebSocket clients
+          httpWss.clients.forEach(client => {
             if (client.readyState === 1) {
-              client.send(JSON.stringify(signalEvent));
+              client.send(broadcastMessage);
             }
           });
+          
+          // Broadcast to HTTPS WebSocket clients if available
+          if (httpsWss) {
+            httpsWss.clients.forEach(client => {
+              if (client.readyState === 1) {
+                client.send(broadcastMessage);
+              }
+            });
+          }
         } else {
           console.log(`Peer ${targetId} not available`);
           
@@ -316,11 +353,23 @@ wss.on("connection", (ws) => {
       links
     };
     
-    wss.clients.forEach(client => {
+    const broadcastMessage = JSON.stringify(update);
+    
+    // Broadcast to HTTP WebSocket clients
+    httpWss.clients.forEach(client => {
       if (client.readyState === 1) {
-        client.send(JSON.stringify(update));
+        client.send(broadcastMessage);
       }
     });
+    
+    // Broadcast to HTTPS WebSocket clients if available
+    if (httpsWss) {
+      httpsWss.clients.forEach(client => {
+        if (client.readyState === 1) {
+          client.send(broadcastMessage);
+        }
+      });
+    }
   };
 
   ws.on("close", () => {
@@ -366,7 +415,17 @@ wss.on("connection", (ws) => {
       peers.delete(peerId);
     }
   });
-});
+
+  ws.on('error', (err) => {
+    console.error(`WebSocket error for peer ${peerId?.substring(0, 8) || 'unknown'}:`, err.message);
+  });
+}
+
+// Set up WebSocket handlers for both HTTP and HTTPS
+httpWss.on('connection', handleWebSocketConnection);
+if (httpsWss) {
+  httpsWss.on('connection', handleWebSocketConnection);
+}
 
 // Periodically log overall statistics
 setInterval(() => {
@@ -488,7 +547,30 @@ app.get("/api/stats", (req, res) => {
   res.json(stats);
 });
 
-// Start the server
-server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+// Start servers
+httpServer.listen(PORT, () => {
+  console.log(`🌐 HTTP Server running on port ${PORT}`);
+  console.log(`   Access via: http://localhost:${PORT}`);
+  console.log(`   Or: http://192.168.50.68:${PORT}`);
+});
+
+if (httpsServer) {
+  httpsServer.listen(HTTPS_PORT, () => {
+    console.log(`🔒 HTTPS Server running on port ${HTTPS_PORT}`);
+    console.log(`   Access via: https://localhost:${HTTPS_PORT}`);
+    console.log(`   Or: https://192.168.50.68:${HTTPS_PORT}`);
+    console.log(`   ⚠️  You'll need to accept the self-signed certificate warning in your browser`);
+  });
+} else {
+  console.log(`❌ HTTPS Server not started - SSL certificates missing`);
+}
+
+// Cleanup function
+process.on('SIGINT', () => {
+  console.log('\n🛑 Shutting down servers...');
+  httpServer.close();
+  if (httpsServer) {
+    httpsServer.close();
+  }
+  process.exit(0);
 });

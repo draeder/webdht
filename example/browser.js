@@ -57,6 +57,8 @@ function cacheUIElements() {
   uiElements.getKey = document.getElementById("getKey");
   uiElements.getBtn = document.getElementById("getBtn");
   uiElements.getResult = document.getElementById("getResult");
+  uiElements.refreshKeysBtn = document.getElementById("refreshKeysBtn");
+  uiElements.keysResult = document.getElementById("keysResult");
   uiElements.peers = document.getElementById("peers"); // <<< ADDED: Cache the connected peers div
   uiElements.connectionStatus = document.getElementById("connectionStatus"); // For signaling connection status
 }
@@ -1462,6 +1464,49 @@ function setupUIEventListeners() {
       if (uiElements.getResult) {
         uiElements.getResult.textContent = "";
       }
+    }
+  });
+
+  // Refresh Keys Button
+  safeAddEventListener("refreshKeysBtn", "onclick", async (event) => {
+    event.preventDefault();
+    try {
+      browserUiAdapter.updateStatus("Loading all DHT keys...");
+      
+      const dhtInstance = window.dhtInstance;
+      if (!dhtInstance) {
+        throw new Error("DHT not initialized");
+      }
+      
+      const keys = dhtInstance.getKeys();
+      
+      if (uiElements.keysResult) {
+        if (keys.length === 0) {
+          uiElements.keysResult.innerHTML = '<div class="result">No keys stored in DHT</div>';
+        } else {
+          const keyList = keys.map(keyObj => `
+            <div style="margin: 8px 0; padding: 8px; background: #f8f9fa; border-radius: 4px; border-left: 3px solid #0366d6;">
+              <div style="font-weight: 600; color: #0366d6; margin-bottom: 4px;">Key: ${keyObj.originalKey}</div>
+              <div style="font-family: monospace; font-size: 12px; color: #666; word-break: break-all;">Hash: ${keyObj.hash}</div>
+            </div>
+          `).join('');
+          uiElements.keysResult.innerHTML = `
+            <div class="result">
+              <strong>Found ${keys.length} key(s) stored in local DHT:</strong>
+              <div style="margin-top: 10px;">
+                ${keyList}
+              </div>
+            </div>
+          `;
+        }
+      }
+      
+      browserUiAdapter.updateStatus(`Loaded ${keys.length} DHT keys.`);
+    } catch (err) {
+      if (uiElements.keysResult) {
+        uiElements.keysResult.innerHTML = `<div class="result">Error: ${err.message}</div>`;
+      }
+      browserUiAdapter.updateStatus(`Failed to load keys: ${err.message}`, true);
     }
   });
 
