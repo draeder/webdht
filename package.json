@@ -1,6 +1,6 @@
 {
   "name": "webdht",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Kademlia-like DHT for browsers and Node.js using simple-peer",
   "main": "src/index.js",
   "type": "module",
