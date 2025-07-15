@@ -1,6 +1,6 @@
 # WebDHT
 
-A Kademlia-inspired Distributed Hash Table that runs in both browser and Node.js environments, using WebRTC for peer-to-peer communication.
+A Kademlia-inspired Distributed Hash Table that runs in both browser and Node.js environments, using WebRTC for peer-to-peer communication with built-in chess game demonstration.
 
 ## Features
 
@@ -10,30 +10,39 @@ A Kademlia-inspired Distributed Hash Table that runs in both browser and Node.js
 -   **Built-in SHA1**: SHA1 implementation included—no external dependencies.
 -   **Promise-Based API**: All methods return Promises for easy async/await usage.
 -   **Event-Driven**: Emits events for lifecycle and signaling hooks.
--   **Pluggable Transports**: WebDHT supports multiple transport mechanisms for signaling and establishing peer connections. While you can implement custom transports, it comes with built-in support for several common methods.
+-   **Interactive Chess Game**: Full multiplayer chess implementation using DHT for matchmaking and game state.
+-   **Multiple Transport Support**: WebSocket, Azure, AWS, GCP, and PubNub transports for signaling.
+-   **Comprehensive Demo Interface**: Web interface with Network, DHT Storage, Chess, and Tools tabs.
+-   **HTTPS Support**: Secure development server with SSL certificates included.
 
-    -   **WebSocket Transport (Default Signaling)**: This is the primary and default mechanism for signaling in WebDHT. Peers connect to a WebSocket server to exchange WebRTC handshake messages (offers, answers, ICE candidates). 
-        -   **Usage**: Typically, you provide the WebSocket server URL in the `WebDHT` constructor options (e.g., `new WebDHT({ transport: [{ type: 'ws', url: 'wss://your-signaling-server.com' }] })`). If no transport is specified, WebDHT might attempt to use a default public signaling server if configured to do so, or it will rely on manual signaling via the `signal` event and `dht.signal()` method.
-        -   It's crucial for establishing initial peer connections before direct WebRTC communication takes over.
+## Live Demo
 
-    -   **Azure Transport**: Provides an alternative signaling mechanism using Azure services. This is less commonly used as a default and is more for specific cloud-based deployments.
+The included web interface demonstrates:
 
-    -   **Other Default Transports**: (If any other defaults are present or implied by the library's behavior, they would be listed here. For now, WebSocket is the main default for signaling.)
-
-    You can also create and use your own custom transports by adhering to the transport interface expected by WebDHT.
+- **Network Tab**: Peer discovery, connection management, and messaging
+- **DHT Storage Tab**: Store and retrieve key-value data across the network
+- **Chess Tab**: Full multiplayer chess with DHT-based matchmaking and real-time gameplay
+- **Tools Tab**: SHA1 utilities and development tools
 
 ## Installation
 
 ```bash
-npm install webdht
+npm install @draeder/webdht
 ```
 
 ## Quick Start
 
-### Browser
+### Start the Demo Server
+
+```bash
+npm start
+# Opens on http://localhost:3001 and https://localhost:3443
+```
+
+### Browser Usage
 
 ```javascript
-import WebDHT from 'webdht';
+import WebDHT from '@draeder/webdht';
 
 // Create node
 const dht = new WebDHT();
@@ -56,10 +65,10 @@ await dht.put('myKey', 'myValue');
 const value = await dht.get('myKey');
 ```
 
-### Node.js
+### Node.js Usage
 
 ```javascript
-import WebDHT from 'webdht';
+import WebDHT from '@draeder/webdht';
 
 const dht = new WebDHT();
 
@@ -106,199 +115,189 @@ dht.on('peer:connect', (peerId) => {
 | `peer:disconnect` | `peerId: string`  | Emitted when a peer disconnects.                 |
 | `peer:error`      | `error: Error`    | Emitted on a peer connection error.              |
 
-### API Helpers (from `src/api.js`)
+### API Helpers
 
-| Function                 | Signature                                       | Description                                                                          |
-| :----------------------- | :---------------------------------------------- | :----------------------------------------------------------------------------------- |
-| `initializeApi`          | `initializeApi(dht, adapter, debug?)`           | Link a DHT instance to a UI adapter for status updates and debug logging.            |
-| `connectSignaling`       | `connectSignaling({ type, url, ... }): Promise<void>` | Establish connection to a signaling server via the specified transport.              |
-| `putValue`               | `putValue(key, value): Promise<boolean>`        | Shortcut for `dht.put` with added logging.                                         |
-| `getValue`               | `getValue(key): Promise<any>`                   | Shortcut for `dht.get` with added logging.                                         |
-| `createTransport`        | `createTransport(type, options): Transport`     | Factory for built-in transports (`websocket`, `azure`).                                |
-| `getAvailableTransports` | `getAvailableTransports(): string[]`            | List of supported transport types.                                                   |
-| `sendMessageToPeer`      | `sendMessageToPeer(peerId, message): void`      | Send arbitrary message over an existing peer connection.                             |
-| `disconnectSignaling`    | `disconnectSignaling(): void`                   | Close the signaling transport and clean up listeners.                                |
-| `setDebug`               | `setDebug(enabled: boolean): void`              | Enable or disable verbose debug logging in the API layer.                            |
+WebDHT includes helper functions in `src/api.js` for easier integration:
 
-### Using API Helpers with Transports
+| Function | Description |
+| :------- | :---------- |
+| `initializeApi(dht, adapter?, debug?)` | Initialize API layer with DHT instance |
+| `connectSignaling(config)` | Connect to signaling server |
+| `putValue(key, value)` | Store data with logging |
+| `getValue(key)` | Retrieve data with logging |
+| `disconnectSignaling()` | Close signaling connection |
+| `setDebug(enabled)` | Enable/disable debug logging |
 
-The `api.js` module provides helper functions to simplify interaction with WebDHT, especially when managing signaling transports. This section demonstrates a typical workflow.
-
-**1. Import necessary modules:**
-
-Make sure to import `WebDHT` and the required API helper functions. The exact import path might depend on your project setup and how `webdht` structures its exports.
-
+**Example:**
 ```javascript
-// For ES Modules:
-import WebDHT, {
-  initializeApi,
-  connectSignaling,
-  disconnectSignaling,
-  // createTransport, // Use if you need to instantiate transport manually for advanced cases
-  putValue,
-  getValue,
-  setDebug
-} from 'webdht';
+import WebDHT, { initializeApi, connectSignaling, putValue, getValue } from 'webdht';
 
-// For CommonJS (Node.js):
-// const { WebDHT, initializeApi, connectSignaling, ... } = require('webdht');
-```
+const dht = new WebDHT();
+initializeApi(dht, null, true); // Enable debug logging
 
-**2. Initialize WebDHT and the API Layer:**
-
-First, create an instance of `WebDHT`. Then, use `initializeApi` to link this instance with the API helper system. This function also allows you to set up a UI adapter (for status updates, optional) and enable/disable debug logging for the API operations.
-
-```javascript
-// Create a WebDHT instance
-const dht = new WebDHT({
-  // bootstrap: ['ws://another-peer-signal-server.com/signal'], // Optional: bootstrap nodes
-  // nodeId: 'your-custom-node-id-hex', // Optional: specify a node ID
+await connectSignaling({
+  type: 'websocket',
+  url: 'wss://your-signaling-server.com'
 });
 
-// Initialize the API layer
-// The second argument (adapter) is for UI updates; can be null if not used.
-// The third argument enables/disables debug logging for the API helpers.
-initializeApi(dht, null /* adapter */, true /* debug */);
-// Alternatively, you can call setDebug(true) separately.
-```
-
-**3. Connect to a Signaling Server:**
-
-Use the `connectSignaling` helper to establish a connection with your signaling server. You'll need to provide the transport type and its specific options (e.g., URL for a WebSocket server).
-
-```javascript
-async function setupSignalingConnection() {
-  const transportConfig = {
-    type: 'websocket', // Specify the transport type (e.g., 'websocket', 'azure')
-    url: 'wss://your-signaling-server.com' // Replace with your actual signaling server URL
-    // For 'azure', you'd provide 'connectionString' and 'hubName'
-  };
-
-  try {
-    // connectSignaling handles the creation and management of the transport
-    await connectSignaling(transportConfig);
-    console.log('Successfully connected to signaling server via API helper.');
-
-    // At this point, the DHT instance is ready to discover and connect to peers
-    // through the configured signaling mechanism.
-  } catch (error) {
-    console.error('Failed to connect to signaling server:', error);
-    // Handle connection errors (e.g., server down, incorrect URL)
-  }
-}
-
-// Call the function to establish the signaling connection
-setupSignalingConnection();
-```
-**Note on `createTransport`:** The `createTransport(type, options)` function is also available if you need to create a transport instance manually (e.g., to attach specific event listeners before `connectSignaling` is called). However, for most use cases, passing the configuration object to `connectSignaling` is sufficient as it will internally manage the transport lifecycle. If `connectSignaling` were to accept a pre-made transport instance, that would be an alternative flow.
-
-**4. Using DHT Operations (Put/Get):**
-
-Once `initializeApi` has been called and `connectSignaling` has successfully established a connection, you can use API helpers like `putValue` and `getValue`. These helpers will use the DHT instance you provided to `initializeApi`.
-
-```javascript
-// Listen for the DHT 'ready' event, which indicates the node is initialized
+// Use the DHT
 dht.on('ready', async (nodeId) => {
-  console.log(`DHT Node is ready. Node ID: ${nodeId}`);
-
-  try {
-    const exampleKey = 'myFavoriteColor';
-    const exampleValue = 'blue';
-
-    console.log(`Attempting to PUT: { "${exampleKey}": "${exampleValue}" }`);
-    const putSuccess = await putValue(exampleKey, exampleValue);
-
-    if (putSuccess) {
-      console.log('PUT operation successful!');
-
-      console.log(`Attempting to GET value for key: "${exampleKey}"`);
-      const retrievedValue = await getValue(exampleKey);
-      console.log(`Retrieved value: "${retrievedValue}"`);
-
-      if (retrievedValue === exampleValue) {
-        console.log('Success! Value retrieved matches value put.');
-      } else {
-        console.warn('Value mismatch or value not found.');
-      }
-    } else {
-      console.error('PUT operation failed. The value might not be stored on enough peers.');
-    }
-  } catch (error) {
-    console.error('An error occurred during DHT PUT/GET operations:', error);
-  }
-});
-
-// Important: Handle DHT's 'signal' events for WebRTC
-// The signaling transport (e.g., WebSocket) connected via connectSignaling
-// is responsible for relaying these WebRTC handshake messages between peers.
-dht.on('signal', (signalData, peerId) => {
-  // The 'signalData' should be sent to the target peer (or broadcast if an offer).
-  // The transport configured via connectSignaling should handle this.
-  // For example, a WebSocket transport would send this data over the WebSocket connection.
-  console.log(`DHT generated signal for peer ${peerId ? peerId.substring(0,8) : 'N/A'}. Data:`, signalData.type);
-  // No explicit action needed here if transport handles relay, but good for logging.
-});
-
-dht.on('peer:connect', (peerId) => {
-  console.log(`Connected to peer: ${peerId.substring(0,8)}`);
-});
-
-dht.on('peer:disconnect', (peerId) => {
-  console.log(`Disconnected from peer: ${peerId.substring(0,8)}`);
+  await putValue('myKey', 'myValue');
+  const value = await getValue('myKey');
+  console.log('Retrieved:', value);
 });
 ```
 
-**5. Disconnecting from the Signaling Server:**
-
-When your application is shutting down or you no longer need the signaling connection, use `disconnectSignaling`.
+### Quick Start Example
 
 ```javascript
-// Example: Call this when cleaning up
-async function teardownSignalingConnection() {
-  try {
-    await disconnectSignaling();
-    console.log('Disconnected from signaling server.');
-  } catch (error) {
-    console.error('Error disconnecting from signaling server:', error);
-  }
-}
+import WebDHT, { initializeApi, connectSignaling, putValue, getValue } from 'webdht';
 
-// window.addEventListener('beforeunload', () => {
-//   teardownSignalingConnection();
-// });
+// Create and initialize DHT
+const dht = new WebDHT();
+initializeApi(dht, null, true); // Enable debug logging
+
+// Connect to signaling server
+await connectSignaling({
+  type: 'websocket',
+  url: 'wss://your-signaling-server.com'
+});
+
+// Listen for DHT ready event
+dht.on('ready', async (nodeId) => {
+  console.log('DHT ready, Node ID:', nodeId);
+  
+  // Store and retrieve data
+  await putValue('greeting', 'Hello DHT!');
+  const value = await getValue('greeting');
+  console.log('Retrieved:', value);
+});
+
+// Handle peer events
+dht.on('peer:connect', (peerId) => {
+  console.log('Connected to peer:', peerId);
+});
 ```
-
-This comprehensive example should clarify how `api.js` helpers integrate with transports for signaling in WebDHT.
 
 
 ## Transports
 
+WebDHT supports multiple transport mechanisms for signaling and establishing peer connections:
+
 ### WebSocketTransport
 
 -   **Type**: `websocket`
--   **Usage**: Default simple signaling via WebSocket server.
+-   **Usage**: Default signaling via WebSocket server (primary method)
 -   **Options**:
-    -   `url` (string): WebSocket server URL.
+    -   `url` (string): WebSocket server URL
 
 ### AzureTransport
 
 -   **Type**: `azure`
--   **Usage**: Signaling via Azure Web PubSub or SignalR Service.
+-   **Usage**: Signaling via Azure Web PubSub or SignalR Service
 -   **Options**:
     -   `connectionString` (string)
     -   `hubName` (string)
 
-## Examples
+### AWSTransport
 
-See the `example/` directory for full demos.
+-   **Type**: `aws`
+-   **Usage**: Signaling via AWS services
+-   **Options**: AWS-specific configuration
 
--   **Browser**: `example/browser.js` — open `index.html` on a local server
--   **Node.js CLI**: `example/node.js` — run with `--autoconnect` to link peers automatically
+### GCPTransport  
+
+-   **Type**: `gcp`
+-   **Usage**: Signaling via Google Cloud Platform services
+-   **Options**: GCP-specific configuration
+
+### PubNubTransport
+
+-   **Type**: `pubnub`
+-   **Usage**: Signaling via PubNub real-time messaging
+-   **Options**: PubNub-specific configuration
+
+You can also create custom transports by adhering to the transport interface expected by WebDHT.
+
+## Chess Game Demo
+
+The chess implementation demonstrates advanced DHT usage:
+
+### Features
+- **DHT-Based Matchmaking**: Players find opponents through distributed matchmaking
+- **Real-time Gameplay**: Moves synchronized via gossip protocol with DHT fallback
+- **Game State Persistence**: Complete game state stored in DHT
+- **Reconnection Support**: Games survive network interruptions
+- **Draw Offers & Resignation**: Full game action support
+
+### Game Architecture
+- **Matchmaking**: Uses shared DHT key for peer discovery
+- **Move Synchronization**: Gossip protocol for real-time moves, DHT polling for reliability
+- **State Management**: Game state stored under unique game IDs
+- **Conflict Resolution**: Deterministic game setup prevents race conditions
+
+### Usage
+1. Navigate to the Chess tab in the demo interface
+2. Click "Find Game" to enter matchmaking
+3. Play chess when matched with another player
+4. Games support draw offers, resignation, and rematch requests
+
+## Development & Examples
+
+### Demo Server
+
+The included server provides both HTTP and HTTPS endpoints:
 
 ```bash
-node server.js
-# In browsers: visit http://localhost:3000
-# In terminal: node example/node.js --autoconnect
+npm start
+# HTTP: http://localhost:3001
+# HTTPS: https://localhost:3443 (with included SSL certificates)
+```
+
+### Example Files
+
+-   **`example/index.html`** — Interactive web interface with full DHT and chess demo
+-   **`example/server.js`** — HTTPS-enabled signaling server with WebSocket support
+-   **`example/browser.js`** — Browser-specific DHT implementation
+-   **`example/node.js`** — Node.js CLI example
+-   **`example/chess-module.js`** — Complete multiplayer chess implementation
+-   **`example/game/`** — Chess engine and styling assets
+
+### Running Examples
+
+```bash
+# Start the demo server
+npm start
+
+# Access the web interface
+# Browser: visit http://localhost:3001 or https://localhost:3443
+# Features: Network status, DHT operations, multiplayer chess, tools
+
+# Run Node.js CLI example
+node example/node.js --autoconnect
+```
+
+## Project Structure
+
+```
+webdht/
+├── src/                    # Core DHT implementation
+│   ├── index.js           # Main WebDHT class
+│   ├── dht.js             # Kademlia DHT logic
+│   ├── peer.js            # Peer connection management
+│   └── ...
+├── transports/            # Transport implementations
+│   ├── websocket.js       # WebSocket transport (default)
+│   ├── azure.js          # Azure transport
+│   ├── aws.js            # AWS transport
+│   ├── gcp.js            # GCP transport
+│   └── pubnub.js         # PubNub transport
+├── example/               # Demo and examples
+│   ├── index.html        # Interactive web demo
+│   ├── server.js         # HTTPS signaling server
+│   ├── chess-module.js   # Multiplayer chess
+│   └── game/            # Chess assets
+└── README.md             # This file
 ```
 
 ## License
