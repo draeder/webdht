@@ -27,7 +27,7 @@ The included web interface demonstrates:
 ## Installation
 
 ```bash
-npm install @draeder/webdht
+npm install webdht
 ```
 
 ## Quick Start

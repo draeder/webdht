@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebDHT Chess - Multiplayer Chess Game</title>
+    <link rel="stylesheet" href="game/chess-styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🏰 WebDHT Chess</h1>
+            <p>Multiplayer Chess using Distributed Hash Table</p>
+        </header>
+
+        <!-- Connection Panel -->
+        <div class="panel connection-panel">
+            <h2>🌐 Network Connection</h2>
+            
+            <div class="input-group">
+                <label for="signalingUrl">Signaling Server:</label>
+                <input type="text" id="signalingUrl" value="ws://localhost:3001" placeholder="ws://localhost:3001">
+                <button id="connectSignalingBtn">Connect</button>
+            </div>
+            
+            <div class="status-info">
+                <div class="status-item">
+                    <strong>Your ID:</strong> <span id="peerId">Connecting...</span>
+                </div>
+                <div class="status-item">
+                    <strong>Status:</strong> <span id="status">Auto-connecting...</span>
+                </div>
+                <div class="status-item">
+                    <strong>Connected Peers:</strong> <span id="peerCount">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Matchmaking Panel -->
+        <div class="panel matchmaking-panel">
+            <h2>⚔️ Matchmaking</h2>
+            
+            <div class="matchmaking-controls">
+                <button id="findGameBtn" class="button" disabled>Find Game</button>
+                <button id="cancelSearchBtn" class="button" disabled>Cancel Search</button>
+                <button id="createGameBtn" class="button" disabled>Create Private Game</button>
+            </div>
+            
+            <div class="matchmaking-status">
+                <div id="searchStatus" class="search-status hidden">
+                    <div class="spinner"></div>
+                    <span>Searching for opponents...</span>
+                </div>
+                <div id="gameInvites" class="game-invites"></div>
+            </div>
+
+            <div class="active-games">
+                <h3>Active Games</h3>
+                <div id="gamesList" class="games-list">
+                    <p class="no-games">No active games</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Game Panel -->
+        <div class="panel game-panel">
+            <h2>♟️ Chess Game</h2>
+            
+            <div class="game-info" id="gameInfo">
+                <div class="game-status">
+                    <span id="gameStatus">No game active</span>
+                </div>
+                <div class="player-info">
+                    <div class="player white-player">
+                        <span class="player-color">⚪</span>
+                        <span id="whitePlayer">-</span>
+                        <span id="whiteTime" class="time">15:00</span>
+                    </div>
+                    <div class="player black-player">
+                        <span class="player-color">⚫</span>
+                        <span id="blackPlayer">-</span>
+                        <span id="blackTime" class="time">15:00</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chess-board-container">
+                <div id="chessBoard" class="chess-board"></div>
+                <div class="board-controls">
+                    <button id="resignBtn" class="button" disabled>Resign</button>
+                    <button id="drawBtn" class="button" disabled>Offer Draw</button>
+                    <button id="rematchBtn" class="button hidden">Rematch</button>
+                </div>
+            </div>
+
+            <div class="game-log">
+                <h3>Game Log</h3>
+                <div id="moveHistory" class="move-history"></div>
+            </div>
+        </div>
+
+        <!-- Chat Panel -->
+        <div class="panel chat-panel">
+            <h2>💬 Game Chat</h2>
+            <div id="chatMessages" class="chat-messages"></div>
+            <div class="chat-input">
+                <input type="text" id="chatInput" placeholder="Type a message..." disabled>
+                <button id="sendChatBtn" disabled>Send</button>
+            </div>
+        </div>
+
+        <!-- Debug Panel -->
+        <div class="panel debug-panel collapsed">
+            <h2>🐛 Debug Info <button id="toggleDebugBtn" class="toggle-btn">+</button></h2>
+            <div class="debug-content">
+                <div class="debug-section">
+                    <h4>DHT Statistics</h4>
+                    <div id="dhtStats"></div>
+                </div>
+                <div class="debug-section">
+                    <h4>Network Messages</h4>
+                    <div id="networkMessages" class="log-messages"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Game Invite Modal -->
+    <div id="inviteModal" class="modal hidden">
+        <div class="modal-content">
+            <h3>Game Invitation</h3>
+            <p><span id="inviterName"></span> has invited you to play chess!</p>
+            <div class="modal-actions">
+                <button id="acceptInviteBtn" class="button">Accept</button>
+                <button id="declineInviteBtn" class="button">Decline</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Game End Modal -->
+    <div id="gameEndModal" class="modal hidden">
+        <div class="modal-content">
+            <h3 id="gameEndTitle">Game Over</h3>
+            <p id="gameEndMessage"></p>
+            <div class="modal-actions">
+                <button id="newGameBtn" class="button">Find New Game</button>
+                <button id="closeGameBtn" class="button">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Draw Offer Modal -->
+    <div id="drawOfferModal" class="modal hidden">
+        <div class="modal-content">
+            <h3>Draw Offer</h3>
+            <p>Your opponent offers a draw. Do you accept?</p>
+            <div class="modal-actions">
+                <button id="acceptDrawBtn" class="button">Accept Draw</button>
+                <button id="declineDrawBtn" class="button">Decline</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Rematch Offer Modal -->
+    <div id="rematchOfferModal" class="modal hidden">
+        <div class="modal-content">
+            <h3>Rematch Offer</h3>
+            <p>Your opponent wants a rematch. Do you accept?</p>
+            <div class="modal-actions">
+                <button id="acceptRematchBtn" class="button">Accept Rematch</button>
+                <button id="declineRematchBtn" class="button">Decline</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- General Alert Modal -->
+    <div id="alertModal" class="modal hidden">
+        <div class="modal-content">
+            <h3 id="alertTitle">Notice</h3>
+            <p id="alertMessage"></p>
+            <div class="modal-actions">
+                <button id="alertOkBtn" class="button">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="game/chess.js"></script>
+</body>
+</html>
