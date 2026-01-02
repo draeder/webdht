@@ -228,6 +228,7 @@ const messages = ref([]);
 const seenMessageIds = new Set();
 const sentMessageIds = new Set();
 const peerIdHashCache = new Map();
+const peerIdHashPromises = new Map();
 const sending = ref(false);
 const logs = ref([]);
 
@@ -344,6 +345,15 @@ async function startMesh() {
       autoConnect: autoConnect.value,
     });
 
+    // Force our SHA1-derived ID as the mesh client ID so all peers see the same identifier across browsers.
+    if (peerIdOverride.value) {
+      instance.clientId = peerIdOverride.value;
+      instance.id = peerIdOverride.value;
+      if (typeof instance.setClientId === 'function') {
+        instance.setClientId(peerIdOverride.value);
+      }
+    }
+
     wireMeshEvents(instance);
     mesh.value = instance;
     await instance.init();
@@ -391,27 +401,18 @@ function wireMeshEvents(instance) {
 
   instance.on('peer:connected', async (peerId) => {
     updatePeerLists();
-    const hashedId = peerIdHashCache.has(peerId) ? peerIdHashCache.get(peerId) : await sha1String(peerId);
-    if (!peerIdHashCache.has(peerId)) {
-      peerIdHashCache.set(peerId, hashedId);
-    }
+    const hashedId = await getHashedPeerId(peerId);
     addLog(`Peer connected: ${hashedId}`);
   });
 
   instance.on('peer:disconnected', async (peerId) => {
     updatePeerLists();
-    const hashedId = peerIdHashCache.has(peerId) ? peerIdHashCache.get(peerId) : await sha1String(peerId);
-    if (!peerIdHashCache.has(peerId)) {
-      peerIdHashCache.set(peerId, hashedId);
-    }
+    const hashedId = await getHashedPeerId(peerId);
     addLog(`Peer disconnected: ${hashedId}`);
   });
 
   instance.on('peer:data', async ({ peerId }) => {
-    const hashedId = peerIdHashCache.has(peerId) ? peerIdHashCache.get(peerId) : await sha1String(peerId);
-    if (!peerIdHashCache.has(peerId)) {
-      peerIdHashCache.set(peerId, hashedId);
-    }
+    const hashedId = await getHashedPeerId(peerId);
     addLog(`Data received from ${hashedId}`);
   });
 
@@ -473,13 +474,11 @@ async function handleGossipMessage({ message, local, fromPeer }) {
   if (isOurMessage) {
     from = 'You';
   } else if (fromPeer) {
-    // Always use fromPeer (the actual connection ID) for remote messages, not payload.from
-    if (peerIdHashCache.has(fromPeer)) {
-      from = peerIdHashCache.get(fromPeer);
-    } else {
-      from = await sha1String(fromPeer);
-      peerIdHashCache.set(fromPeer, from);
-    }
+    // Always use fromPeer (the actual connection ID) for remote messages
+    from = await getHashedPeerId(fromPeer);
+  } else if (payload.from) {
+    // Fallback when some browsers do not supply fromPeer
+    from = await getHashedPeerId(payload.from);
   }
 
   messages.value.unshift({
@@ -589,7 +588,28 @@ function refreshStats() {
 }
 
 async function hashIdList(ids) {
-  return Promise.all(ids.map((id) => sha1String(id)));
+  return Promise.all(ids.map((id) => getHashedPeerId(id)));
+}
+
+async function getHashedPeerId(id) {
+  if (!id) return '';
+  if (peerIdHashCache.has(id)) return peerIdHashCache.get(id);
+  if (peerIdHashPromises.has(id)) return peerIdHashPromises.get(id);
+
+  const pending = sha1String(id)
+    .then((hashed) => {
+      peerIdHashCache.set(id, hashed);
+      peerIdHashPromises.delete(id);
+      return hashed;
+    })
+    .catch((err) => {
+      peerIdHashPromises.delete(id);
+      addLog(`Hash failed for ${id}: ${err?.message || err}`);
+      return String(id);
+    });
+
+  peerIdHashPromises.set(id, pending);
+  return pending;
 }
 
 async function sha1String(str) {
