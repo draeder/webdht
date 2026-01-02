@@ -124,182 +124,109 @@ WebDHT includes helper functions in `src/api.js` for easier integration:
 | `initializeApi(dht, adapter?, debug?)` | Initialize API layer with DHT instance |
 | `connectSignaling(config)` | Connect to signaling server |
 | `putValue(key, value)` | Store data with logging |
-| `getValue(key)` | Retrieve data with logging |
-| `disconnectSignaling()` | Close signaling connection |
-| `setDebug(enabled)` | Enable/disable debug logging |
-
-**Example:**
-```javascript
-import WebDHT, { initializeApi, connectSignaling, putValue, getValue } from 'webdht';
-
-const dht = new WebDHT();
-initializeApi(dht, null, true); // Enable debug logging
-
-await connectSignaling({
-  type: 'websocket',
-  url: 'wss://your-signaling-server.com'
-});
-
-// Use the DHT
-dht.on('ready', async (nodeId) => {
-  await putValue('myKey', 'myValue');
-  const value = await getValue('myKey');
-  console.log('Retrieved:', value);
-});
-```
-
-### Quick Start Example
-
-```javascript
-import WebDHT, { initializeApi, connectSignaling, putValue, getValue } from 'webdht';
-
-// Create and initialize DHT
-const dht = new WebDHT();
-initializeApi(dht, null, true); // Enable debug logging
-
-// Connect to signaling server
-await connectSignaling({
-  type: 'websocket',
-  url: 'wss://your-signaling-server.com'
-});
-
-// Listen for DHT ready event
-dht.on('ready', async (nodeId) => {
-  console.log('DHT ready, Node ID:', nodeId);
-  
-  // Store and retrieve data
-  await putValue('greeting', 'Hello DHT!');
-  const value = await getValue('greeting');
-  console.log('Retrieved:', value);
-});
-
-// Handle peer events
 dht.on('peer:connect', (peerId) => {
-  console.log('Connected to peer:', peerId);
-});
-```
 
-
-## Transports
-
-WebDHT supports multiple transport mechanisms for signaling and establishing peer connections:
-
-### WebSocketTransport
-
--   **Type**: `websocket`
--   **Usage**: Default signaling via WebSocket server (primary method)
--   **Options**:
-    -   `url` (string): WebSocket server URL
-
-### AzureTransport
-
--   **Type**: `azure`
--   **Usage**: Signaling via Azure Web PubSub or SignalR Service
--   **Options**:
-    -   `connectionString` (string)
     -   `hubName` (string)
-
-### AWSTransport
-
--   **Type**: `aws`
--   **Usage**: Signaling via AWS services
 -   **Options**: AWS-specific configuration
-
-### GCPTransport  
-
--   **Type**: `gcp`
--   **Usage**: Signaling via Google Cloud Platform services
--   **Options**: GCP-specific configuration
-
-### PubNubTransport
-
--   **Type**: `pubnub`
--   **Usage**: Signaling via PubNub real-time messaging
--   **Options**: PubNub-specific configuration
-
-You can also create custom transports by adhering to the transport interface expected by WebDHT.
-
-## Chess Game Demo
-
-The chess implementation demonstrates advanced DHT usage:
-
-### Features
-- **DHT-Based Matchmaking**: Players find opponents through distributed matchmaking
-- **Real-time Gameplay**: Moves synchronized via gossip protocol with DHT fallback
-- **Game State Persistence**: Complete game state stored in DHT
-- **Reconnection Support**: Games survive network interruptions
-- **Draw Offers & Resignation**: Full game action support
-
-### Game Architecture
-- **Matchmaking**: Uses shared DHT key for peer discovery
-- **Move Synchronization**: Gossip protocol for real-time moves, DHT polling for reliability
-- **State Management**: Game state stored under unique game IDs
-- **Conflict Resolution**: Deterministic game setup prevents race conditions
-
-### Usage
-1. Navigate to the Chess tab in the demo interface
-2. Click "Find Game" to enter matchmaking
-3. Play chess when matched with another player
-4. Games support draw offers, resignation, and rematch requests
-
-## Development & Examples
-
-### Demo Server
-
-The included server provides both HTTP and HTTPS endpoints:
-
-```bash
-npm start
-# HTTP: http://localhost:3001
-# HTTPS: https://localhost:3443 (with included SSL certificates)
-```
-
-### Example Files
-
--   **`example/index.html`** — Interactive web interface with full DHT and chess demo
--   **`example/server.js`** — HTTPS-enabled signaling server with WebSocket support
--   **`example/browser.js`** — Browser-specific DHT implementation
--   **`example/node.js`** — Node.js CLI example
--   **`example/chess-module.js`** — Complete multiplayer chess implementation
--   **`example/game/`** — Chess engine and styling assets
-
-### Running Examples
-
-```bash
 # Start the demo server
-npm start
-
-# Access the web interface
-# Browser: visit http://localhost:3001 or https://localhost:3443
-# Features: Network status, DHT operations, multiplayer chess, tools
-
-# Run Node.js CLI example
-node example/node.js --autoconnect
-```
-
-## Project Structure
-
-```
-webdht/
-├── src/                    # Core DHT implementation
-│   ├── index.js           # Main WebDHT class
-│   ├── dht.js             # Kademlia DHT logic
-│   ├── peer.js            # Peer connection management
-│   └── ...
-├── transports/            # Transport implementations
-│   ├── websocket.js       # WebSocket transport (default)
-│   ├── azure.js          # Azure transport
 │   ├── aws.js            # AWS transport
-│   ├── gcp.js            # GCP transport
-│   └── pubnub.js         # PubNub transport
-├── example/               # Demo and examples
-│   ├── index.html        # Interactive web demo
-│   ├── server.js         # HTTPS signaling server
-│   ├── chess-module.js   # Multiplayer chess
-│   └── game/            # Chess assets
-└── README.md             # This file
+
+# WebDHT Mesh Console (Vue 3 + Vite)
+
+Modernized WebDHT frontend built with **Vue 3** and **Vite**, wired to peer-to-peer primitives from:
+
+- [partialmesh](https://github.com/draeder/partialmesh) for WebRTC partial-mesh topology
+- [gossip-protocol](https://github.com/draeder/gossip-protocol) for message re-propagation
+- [UniWRTC](https://github.com/draeder/UniWRTC) for WebSocket signaling
+- [unsea](https://github.com/draeder/unsea) for key generation and message signing
+
+The new console lets you join a session, observe discovered/connected peers, and broadcast signed messages across the mesh.
+
+## Quick start
+
+```bash
+npm install
+npm run dev
+# open http://localhost:5173
 ```
+
+By default the app points at the public signaling service `wss://signal.peer.ooo`. Update the signaling URL or session ID in the UI before starting the mesh if needed.
+
+## What changed
+
+- Rebuilt as a Vite + Vue 3 SPA (no legacy Express/server demo required).
+- Mesh connectivity uses `PartialMesh` (from `partialmesh`) with UniWRTC signaling for discovery.
+- Gossip propagation handled by `GossipProtocol` for bounded-hop re-broadcasts.
+- Unsea generates an identity keypair and signs/validates each gossip payload.
+- UniWRTC is also used directly for a quick signaling “probe” and room listing.
+
+## App flow
+
+1. **Generate keys** — Unsea creates a signing keypair shown in the header badge.
+2. **Configure mesh** — Set session ID, signaling server, min/max peers, and gossip hop limit.
+3. **Start mesh** — PartialMesh connects to UniWRTC, auto-discovers peers, and becomes ready once `minPeers` are connected.
+4. **Broadcast** — Type a message and send; GossipProtocol distributes it to peers and verifies signatures on receipt.
+5. **Inspect** — Watch connected/discovered peers, gossip stats, and activity logs in real time.
+
+## Scripts
+
+- `npm run dev` — Vite dev server with HMR
+- `npm run build` — Production build
+- `npm run preview` — Preview the production build locally
+
+## Notes
+
+- The public signaling host is shared. Use unique session IDs in development to avoid cross-talk.
+# WebDHT Mesh Console (Vue 3 + Vite)
+
+Modernized WebDHT frontend built with **Vue 3** and **Vite**, wired to peer-to-peer primitives from:
+
+- [partialmesh](https://github.com/draeder/partialmesh) for WebRTC partial-mesh topology
+- [gossip-protocol](https://github.com/draeder/gossip-protocol) for message re-propagation
+- [UniWRTC](https://github.com/draeder/UniWRTC) for WebSocket signaling
+- [unsea](https://github.com/draeder/unsea) for key generation and message signing
+
+The new console lets you join a session, observe discovered/connected peers, and broadcast signed messages across the mesh.
+
+## Quick start
+
+```bash
+npm install
+npm run dev
+# open http://localhost:5173
+```
+
+By default the app points at the public signaling service `wss://signal.peer.ooo`. Update the signaling URL or session ID in the UI before starting the mesh if needed.
+
+## What changed
+
+- Rebuilt as a Vite + Vue 3 SPA (no legacy Express/server demo required).
+- Mesh connectivity uses `PartialMesh` (from `partialmesh`) with UniWRTC signaling for discovery.
+- Gossip propagation handled by `GossipProtocol` for bounded-hop re-broadcasts.
+- Unsea generates an identity keypair and signs/validates each gossip payload.
+- UniWRTC is also used directly for a quick signaling “probe” and room listing.
+
+## App flow
+
+1. **Generate keys** — Unsea creates a signing keypair shown in the header badge.
+2. **Configure mesh** — Set session ID, signaling server, min/max peers, and gossip hop limit.
+3. **Start mesh** — PartialMesh connects to UniWRTC, auto-discovers peers, and becomes ready once `minPeers` are connected.
+4. **Broadcast** — Type a message and send; GossipProtocol distributes it to peers and verifies signatures on receipt.
+5. **Inspect** — Watch connected/discovered peers, gossip stats, and activity logs in real time.
+
+## Scripts
+
+- `npm run dev` — Vite dev server with HMR
+- `npm run build` — Production build
+- `npm run preview` — Preview the production build locally
+
+## Notes
+
+- The public signaling host is shared. Use unique session IDs in development to avoid cross-talk.
+- The legacy DHT and chess demo code remain in the repository for reference but are not used by the new UI.
+- All cryptographic operations (keygen, signing, verification) are handled by Unsea in-browser.
 
 ## License
 
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+MIT
+

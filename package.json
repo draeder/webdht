@@ -1,19 +1,26 @@
 {
   "name": "webdht",
-  "version": "0.2.2",
-  "description": "Kademlia-like DHT for browsers and Node.js using simple-peer",
-  "main": "src/index.js",
+  "version": "3.0.0",
+  "description": "Vue 3 + Vite mesh demo using partialmesh, gossip-protocol, uniwrtc, and unsea.",
   "type": "module",
+  "private": true,
   "scripts": {
-    "start": "node example/server.js",
-    "test": "echo \"No tests yet\""
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
-  "keywords": ["dht", "kademlia", "webrtc", "simple-peer", "browser", "node"],
+  "keywords": ["webrtc", "p2p", "partialmesh", "gossip", "vue", "vite"],
   "license": "MIT",
   "dependencies": {
-    "@koush/wrtc": "^0.5.3",
-    "express": "^4.18.2",
+    "gossip-protocol": "^1.0.0",
+    "partialmesh": "^1.0.0",
     "simple-peer": "^9.11.1",
-    "ws": "^8.14.2"
+    "unsea": "^1.1.3",
+    "uniwrtc": "^1.0.7",
+    "vue": "^3.4.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.0",
+    "vite": "^7.3.0"
   }
 }
