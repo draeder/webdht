@@ -16,8 +16,14 @@
       <section class="section settings">
         <h2>Settings</h2>
         <div class="settings-group">
+          <label>Session/Room ID:</label>
+          <input v-model="signalingRoom" type="text" placeholder="webdht-test" class="input" />
+        </div>
+        <div class="settings-group">
           <label>Signaling Server:</label>
           <input v-model="signalingServer" type="text" placeholder="wss://signal.peer.ooo" class="input" />
+        </div>
+        <div class="settings-group">
           <button @click="reconnectSignaling" class="btn">Reconnect</button>
         </div>
       </section>

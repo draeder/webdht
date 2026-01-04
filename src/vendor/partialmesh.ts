@@ -466,27 +466,22 @@ export class PartialMesh {
     const connectingCount = this.connecting.size;
     const totalInProgress = currentPeerCount + connectingCount;
 
-    if (totalInProgress < this.config.minPeers) {
-      const needed = this.config.minPeers - totalInProgress;
+    // Connect to ALL available peers when at or below minPeers
+    if (totalInProgress <= this.config.minPeers) {
       const available = Array.from(this.discoveredPeers).filter(
         (peerId) => !this.peers.has(peerId) && !this.connecting.has(peerId) && !this.isCoolingDown(peerId),
       );
       if (available.length === 0) return;
-      const selfId = this.normalizePeerId(this.clientId);
-      const sorted = available.slice().sort();
-      let offset = 0;
-      if (selfId) {
-        let hash = 0;
-        for (let i = 0; i < selfId.length; i++) {
-          hash = (hash * 31 + selfId.charCodeAt(i)) >>> 0;
-        }
-        offset = sorted.length ? hash % sorted.length : 0;
-      }
-      for (let i = 0; i < Math.min(needed, sorted.length); i++) {
-        const peerId = sorted[(offset + i) % sorted.length];
+
+      // Connect to ALL available peers
+      for (const peerId of available) {
         this.connectToPeer(peerId);
       }
-    } else if (currentPeerCount > this.config.maxPeers) {
+      return;
+    }
+
+    // Otherwise, enforce maxPeers cap
+    if (currentPeerCount > this.config.maxPeers) {
       const toDrop = currentPeerCount - this.config.maxPeers;
       const peerIds = Array.from(this.peers.keys());
       for (let i = 0; i < toDrop; i++) {
