@@ -311,6 +311,8 @@ export default {
 
       if (space === 'public' || space === 'frozen') {
         const requestId = this.makeRequestId()
+        const requestedSpace = space
+        const requestedCanonical = canonical
         const p = new Promise((resolve) => {
           const timeout = setTimeout(() => {
             this.pendingStorageGets.delete(requestId)
@@ -332,11 +334,20 @@ export default {
           // ignore
         }
 
-        const value = await p
-        if (value !== null && value !== undefined) {
-          store?.set(canonical, value)
-          this.persistUiStorageValue(space, canonical, value)
-          this.applyStorageSubscriptionUpdate(space, canonical, value, 'network')
+        const resp = await p
+        if (resp && resp.value !== null && resp.value !== undefined) {
+          const respSpace = resp.space
+          const respKey = resp.key
+          const value = resp.value
+
+          const respStore = this.storageLocal?.[respSpace]
+          respStore?.set(respKey, value)
+          this.persistUiStorageValue(respSpace, respKey, value)
+
+          // Only update the visible subscription UI if we're still subscribed to this key.
+          if (this.storageSubscribedSpace === requestedSpace && this.storageSubscribedCanonicalKey === requestedCanonical) {
+            this.applyStorageSubscriptionUpdate(respSpace, respKey, value, 'network')
+          }
         }
       }
     },
@@ -693,7 +704,7 @@ export default {
       if (store.has(canonical)) {
         const value = store.get(canonical)
         this.storageValue = String(value)
-        this.storageStatus = `Found locally in ${space}`
+        this.storageStatus = `Found in cache in ${space}`
         this.storageResult = String(value)
         this.applyStorageSubscriptionUpdate(space, canonical, value, 'local')
         return
@@ -707,6 +718,9 @@ export default {
 
       const requestId = this.makeRequestId()
       this.storageStatus = `Looking up in ${space}...`
+
+      const requestedSpace = space
+      const requestedCanonical = canonical
 
       const p = new Promise((resolve) => {
         const timeout = setTimeout(() => {
@@ -729,18 +743,28 @@ export default {
         console.error('Storage get broadcast failed', err)
       }
 
-      const value = await p
-      if (value === null || value === undefined) {
+      const resp = await p
+      if (!resp || resp.value === null || resp.value === undefined) {
         this.storageStatus = `Not found in ${space}`
         this.storageResult = ''
         return
       }
-      store.set(canonical, value)
-      this.persistUiStorageValue(space, canonical, value)
-      this.storageValue = String(value)
-      this.storageStatus = `Found in ${space}`
-      this.storageResult = String(value)
-      this.applyStorageSubscriptionUpdate(space, canonical, value, 'network')
+
+      const respSpace = resp.space
+      const respKey = resp.key
+      const value = resp.value
+
+      const respStore = this.storageLocal?.[respSpace]
+      respStore?.set(respKey, value)
+      this.persistUiStorageValue(respSpace, respKey, value)
+
+      // Only update the visible Get UI if the user hasn't changed the requested key/space mid-flight.
+      if (this.storageSpace === requestedSpace && requestedCanonical === this.canonicalStorageKey(this.storageSpace, this.storageKey)) {
+        this.storageValue = String(value)
+        this.storageStatus = `Found in ${respSpace}`
+        this.storageResult = String(value)
+        this.applyStorageSubscriptionUpdate(respSpace, respKey, value, 'network')
+      }
     },
 
     handleStorageMessage(message, local) {
@@ -821,7 +845,7 @@ export default {
         if (!pending) return
         clearTimeout(pending.timeout)
         this.pendingStorageGets.delete(requestId)
-        pending.resolve(String(message.data))
+        pending.resolve({ value: String(message.data), space: pending.space, key: pending.key })
       }
     }
   }
