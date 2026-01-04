@@ -2,7 +2,19 @@
  * SimplePeer factory for cross-environment compatibility
  * Handles the different ways of loading simple-peer in Node.js and browser
  */
-import { ENV } from "./utils.js";
+
+/**
+ * Local environment detection.
+ * Keep this module self-contained so browser bundles don't pull in Node-only deps
+ * via other utility modules.
+ */
+const ENV = {
+  BROWSER: typeof window !== "undefined" && typeof window.document !== "undefined",
+  NODE:
+    typeof process !== "undefined" &&
+    process.versions != null &&
+    process.versions.node != null,
+};
 
 // Cache for SimplePeer constructor
 let SimplePeer = null;
@@ -84,12 +96,13 @@ export async function getSimplePeer() {
   if (ENV.NODE) {
     // Node.js environment
     try {
-      const simplePeerModule = await import("simple-peer");
+      const simplePeerModule = await import(/* @vite-ignore */ "simple-peer");
       SimplePeer = simplePeerModule.default;
 
       // Try to load wrtc for Node.js
       try {
-        const wrtcModule = await import("@koush/wrtc");
+        const moduleName = "@koush/wrtc";
+        const wrtcModule = await import(/* @vite-ignore */ moduleName);
         const wrtc = wrtcModule.default;
 
         // Return a wrapped constructor that includes wrtc by default

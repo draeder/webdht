@@ -9,8 +9,13 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      partialmesh: resolve(__dirname, 'src/vendor/partialmesh.ts'),
       'gossip-protocol': resolve(__dirname, 'src/vendor/gossip-protocol.ts'),
     },
+  },
+  define: {
+    __DEV__: true,
+  },
+  optimizeDeps: {
+    exclude: ['@koush/wrtc', 'simple-peer'],
   },
 });

@@ -82,7 +82,8 @@ class Peer extends EventEmitter {
     try {
       if (ENV.NODE && !this.options.wrtc) {
         try {
-          const wrtcModule = await import("@koush/wrtc");
+          const moduleName = "@koush/wrtc";
+          const wrtcModule = await import(/* @vite-ignore */ moduleName);
           this.options.wrtc = wrtcModule.default;
         } catch (wrtcErr) {
           this._logDebug("Failed to import wrtc in Node:", wrtcErr.message);

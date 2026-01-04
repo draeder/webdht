@@ -150,6 +150,20 @@ npm run dev
 # open http://localhost:5173
 ```
 
+### TURN server (fixes "ICE failed")
+
+If you see WebRTC errors like "ICE failed" or "Ice connection failed", you likely need a TURN relay (common on symmetric NATs, corporate Wi‑Fi, or some mobile networks).
+
+Provide TURN settings via Vite env vars:
+
+```bash
+export VITE_TURN_URL='turn:your-turn-host:3478?transport=udp'
+export VITE_TURN_USERNAME='your-username'
+export VITE_TURN_CREDENTIAL='your-password'
+```
+
+Then restart `npm run dev`.
+
 By default the app points at the public signaling service `wss://signal.peer.ooo`. Update the signaling URL or session ID in the UI before starting the mesh if needed.
 
 ## What changed

@@ -74,28 +74,14 @@
 </template>
 
 <script>
-import { PartialMesh } from './vendor/partialmesh.ts'
-import { GossipProtocol } from './vendor/gossip-protocol.ts'
-
-function buildIceServers() {
-  const servers = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' },
-    { urls: 'stun:global.stun.twilio.com:3478' },
-  ]
-
-  return servers
-}
+import WebDHT from './index.js'
+import { PartialMesh } from 'gossip-protocol'
 
 export default {
   name: 'App',
   data() {
     return {
-      gossip: null,
+      dht: null,
       mesh: null,
       nodeIdShort: '',
       connectedPeers: [],
@@ -110,109 +96,198 @@ export default {
     }
   },
   mounted() {
-    this.setupMesh()
+    this.initDHT()
   },
   methods: {
-    async setupMesh() {
+    initDHT() {
+      this.dht = new WebDHT({
+        bootstrap: [],
+        maxPeers: 10,
+        debug: true
+      })
+
+      const checkReady = setInterval(() => {
+        if (this.dht.nodeId) {
+          clearInterval(checkReady)
+          this.setupDHTHandlers()
+          this.setupMesh()
+        }
+      }, 100)
+    },
+    setupMesh() {
       this.mesh = new PartialMesh({
         sessionId: this.signalingRoom,
-        signalingServer: this.signalingServer,
         minPeers: 1,
         maxPeers: 10,
-        trickle: false,
-        connectionTimeoutMs: 30000,
-        iceServers: buildIceServers(),
-        debug: true,
       })
 
-      this.mesh.on('signaling:connected', (data) => {
-        console.log('✅ Connected to signaling server, clientId:', data.clientId)
-        this.clientId = data.clientId
-        this.nodeIdShort = data.clientId?.substring(0, 8) || ''
-        this.connected = true
+      this.mesh.on('peer', (peerId, conn) => {
+        console.log('✅ Mesh peer connected:', peerId)
+        this.dht.connect({ id: peerId, initiator: false })
       })
 
-      this.mesh.on('signaling:disconnected', () => {
-        console.log('⚠️ Signaling disconnected')
-        this.connected = false
-        this.clientId = null
-        this.nodeIdShort = ''
-        this.connectedPeers = []
-      })
-
-      this.mesh.on('peer:connected', (peerId) => {
-        console.log('✅ Peer connected via mesh:', peerId)
-        if (!this.connectedPeers.includes(peerId)) {
-          this.connectedPeers.push(peerId)
+      this.mesh.on('signal', (peerId, signal) => {
+        console.log('📨 Received signal from', peerId, signal.type)
+        if (this.dht.peers.has(peerId)) {
+          this.dht.peers.get(peerId).signal(signal)
+        } else {
+          this.dht.connect({ id: peerId, signal, initiator: false })
         }
       })
 
-      this.mesh.on('peer:discovered', (peerId) => {
-        console.log('🔎 Discovered peer:', peerId)
+      this.mesh.on('disconnect', (peerId) => {
+        console.log('❌ Mesh peer disconnected:', peerId)
+        if (this.dht.peers.has(peerId)) {
+          this.dht.peers.get(peerId).destroy()
+          this.dht.peers.delete(peerId)
+          this.updatePeerList()
+        }
       })
 
-      this.mesh.on('peer:disconnected', (peerId) => {
-        console.log('❌ Peer disconnected:', peerId)
-        this.connectedPeers = this.connectedPeers.filter(p => p !== peerId)
+      this.connected = true
+    },
+    setupDHTHandlers() {
+      const nodeIdHex = this.dht.nodeId.substring(0, 8)
+      this.nodeIdShort = nodeIdHex
+
+      this.dht.on('peer:connect', (peerId) => {
+        console.log('✅ DHT peer connected:', peerId)
+        this.updatePeerList()
       })
 
-      this.mesh.on('peer:error', (payload) => {
-        console.error('Peer error:', payload?.peerId, payload?.error)
+      this.dht.on('peer:disconnect', (peerId) => {
+        console.log('❌ DHT peer disconnected:', peerId)
+        this.updatePeerList()
       })
 
-      this.mesh.on('signaling:error', (err) => {
-        console.error('Signaling error:', err)
+      this.dht.on('signal', (data) => {
+        console.log(`📤 Forwarding ${data.signal.type} to ${data.id}`)
+        if (this.mesh) {
+          this.mesh.signal(data.id, data.signal)
+        }
       })
+    },
+    connectToSignalingServer() {
+      const url = this.signalingServer.startsWith('ws') 
+        ? `${this.signalingServer}?room=${this.signalingRoom}`
+        : `wss://${this.signalingServer}?room=${this.signalingRoom}`
 
-      // Initialize gossip protocol
-      this.gossip = new GossipProtocol(this.mesh, { maxHops: 3 })
+      console.log('Connecting to:', url)
+      try {
+        this.signalingWs = new WebSocket(url)
 
-      this.gossip.on('messageReceived', (data) => {
-        const { message, local, fromPeer } = data
-        this.messages.push({
-          peer: message.sender || fromPeer || 'unknown',
-          text: String(message.data),
-          outgoing: local,
-          time: new Date(message.timestamp).toLocaleTimeString()
-        })
-      })
+        this.signalingWs.onopen = () => {
+          console.log('Connected to signaling server')
+          this.connected = true
+          // UniWRTC auto-registers, no need to send REGISTER
+        }
 
-      // Initialize and connect to signaling server
-      await this.mesh.init()
+        this.signalingWs.onmessage = (event) => {
+          const msg = JSON.parse(event.data)
+          console.log('Received from signaling server:', msg.type, msg)
+          
+          if (msg.type === 'welcome') {
+            console.log('✅ Registered with signaling server, clientId:', msg.clientId)
+            // Store our client ID from the server
+            this.clientId = msg.clientId
+            
+            // Request existing peers
+            console.log('📡 Requesting peer list...')
+            this.signalingWs.send(JSON.stringify({ type: 'get-peers' }))
+          }
+          
+          if (msg.type === 'peers') {
+            console.log('📋 Received peer list:', msg.peers.length, 'peers:', msg.peers)
+            for (const peerId of msg.peers) {
+              if (peerId !== this.clientId && !this.dht.peers.has(peerId)) {
+                console.log(`🔗 Connecting to existing peer (initiator=true): ${peerId}`)
+                this.dht.connect({ id: peerId, initiator: true })
+              }
+            }
+          }
+          
+          if (msg.type === 'signal') {
+            const peerId = msg.peerId || msg.from
+            console.log(`📨 Processing ${msg.signal?.type} signal from ${peerId}`)
+            if (this.dht.peers.has(peerId)) {
+              this.dht.peers.get(peerId).signal(msg.signal)
+            } else {
+              console.log(`🆕 Creating new peer connection (initiator=false) to ${peerId}`)
+              this.dht.connect({ id: peerId, signal: msg.signal, initiator: false })
+            }
+          }
+
+          if (msg.type === 'peer-joined') {
+            const peerId = msg.peerId
+            console.log(`👋 Peer joined: ${peerId}`)
+            if (peerId !== this.clientId && !this.dht.peers.has(peerId)) {
+              console.log(`🔗 Connecting to new peer (initiator=true): ${peerId}`)
+              this.dht.connect({ id: peerId, initiator: true })
+            }
+          }
+          
+          if (msg.type === 'peer-left') {
+            const peerId = msg.peerId
+            console.log(`Peer left: ${peerId}`)
+            if (this.dht.peers.has(peerId)) {
+              this.dht.peers.get(peerId).destroy()
+              this.dht.peers.delete(peerId)
+              this.updatePeerList()
+            }
+          }
+        }
+
+        this.signalingWs.onerror = (err) => {
+          console.error('Signaling server error:', err)
+          this.connected = false
+        }
+
+        this.signalingWs.onclose = () => {
+          console.log('Disconnected from signaling server')
+          this.connected = false
+        }
+      } catch (err) {
+        console.error('Failed to connect to signaling server:', err)
+        this.connected = false
+      }
     },
     openNewWindow() {
       window.open(window.location.href, '_blank')
     },
-    async reconnectSignaling() {
+    reconnectSignaling() {
       if (this.mesh) {
         this.mesh.destroy()
       }
-      await this.setupMesh()
+      this.setupMesh()
+    },
+    updatePeerList() {
+      this.connectedPeers = Array.from(this.dht.peers.keys())
     },
     sendMessage() {
-      if (!this.messageText || !this.mesh) return
+      if (!this.messageText) return
 
-      const text = this.messageText
+      const msg = {
+        type: 'MESSAGE',
+        text: this.messageText,
+        from: this.dht.nodeId
+      }
 
       if (this.selectedPeer) {
-        // For direct messages, we still use mesh.send since gossip is for broadcast
-        try {
-          this.mesh.send(this.selectedPeer, text)
-        } catch (err) {
-          console.error('Failed to send to peer', err)
+        const peer = this.dht.peers.get(this.selectedPeer)
+        if (peer && peer.connected) {
+          peer.send(JSON.stringify(msg))
         }
       } else {
-        // Use gossip for broadcast messages
-        try {
-          this.gossip.broadcast(text)
-        } catch (err) {
-          console.error('Failed to gossip message', err)
+        for (const peer of this.dht.peers.values()) {
+          if (peer.connected) {
+            peer.send(JSON.stringify(msg))
+          }
         }
       }
 
       this.messages.push({
         peer: this.selectedPeer || 'broadcast',
-        text,
+        text: this.messageText,
         outgoing: true,
         time: new Date().toLocaleTimeString()
       })

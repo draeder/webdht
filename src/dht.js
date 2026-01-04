@@ -2605,6 +2605,20 @@ class DHT extends EventEmitter {
     }
     return keys;
   }
+
+  /**
+   * Handle incoming signal from signaling server
+   * @param {Object} data - Signal data from signaling server
+   */
+  onSignal(data) {
+    if (!data || !data.id || !data.signal) {
+      console.warn('Invalid signal format:', data);
+      return;
+    }
+    
+    // Forward to the internal signal handler
+    this._onIncomingSignal({ id: data.id, signal: data.signal, viaDht: false });
+  }
 }
 
 export default DHT;

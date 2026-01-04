@@ -1,4 +1,4 @@
-import SimplePeer from 'simple-peer/simplepeer.min.js';
+import { getSimplePeer } from '../peer-factory.js';
 import type { Instance as SimplePeerInstance } from 'simple-peer';
 
 export interface PartialMeshConfig {
@@ -9,6 +9,8 @@ export interface PartialMeshConfig {
   autoDiscover?: boolean;
   autoConnect?: boolean;
   iceServers?: RTCIceServer[];
+  trickle?: boolean;
+  debug?: boolean;
   connectionTimeoutMs?: number;
   maintenanceIntervalMs?: number;
   underConnectedResetMs?: number;
@@ -47,6 +49,8 @@ export class PartialMesh {
   private eventHandlers: Map<keyof PartialMeshEvents, Set<Function>> = new Map();
   private connecting: Set<string> = new Set();
   private connectionTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private peerFailureCount: Map<string, number> = new Map();
+  private peerCooldownUntilMs: Map<string, number> = new Map();
   private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
   private underConnectedSinceMs: number | null = null;
   private lastHardResetAtMs: number = 0;
@@ -60,6 +64,8 @@ export class PartialMesh {
       autoDiscover: config.autoDiscover ?? true,
       autoConnect: config.autoConnect ?? true,
       iceServers: config.iceServers ?? [{ urls: 'stun:stun.l.google.com:19302' }],
+      trickle: config.trickle ?? false,
+      debug: config.debug ?? false,
       connectionTimeoutMs: config.connectionTimeoutMs ?? 25_000,
       maintenanceIntervalMs: config.maintenanceIntervalMs ?? 2_000,
       underConnectedResetMs: config.underConnectedResetMs ?? 0,
@@ -79,8 +85,35 @@ export class PartialMesh {
     events.forEach((event) => this.eventHandlers.set(event, new Set()));
   }
 
+  private log(...args: any[]): void {
+    if (this.config.debug) {
+      console.log('[PartialMesh]', ...args);
+    }
+  }
+
   private normalizePeerId(peerId: string | null | undefined): string {
     return (peerId ?? '').trim();
+  }
+
+  private isCoolingDown(peerId: string): boolean {
+    const until = this.peerCooldownUntilMs.get(peerId);
+    return until != null && Date.now() < until;
+  }
+
+  private markPeerFailure(peerId: string, reason: string): void {
+    const prev = this.peerFailureCount.get(peerId) ?? 0;
+    const next = Math.min(prev + 1, 5);
+    this.peerFailureCount.set(peerId, next);
+
+    // Linear backoff (not exponential) to avoid starving the peer pool on public servers.
+    // Cap at 30s so we keep trying even after repeated failures.
+    const now = Date.now();
+    const baseMs = 1_500;
+    const maxMs = 30_000;
+    const backoffMs = Math.min(maxMs, baseMs * next);
+    const jitterMs = Math.floor(Math.random() * 500);
+    this.peerCooldownUntilMs.set(peerId, now + backoffMs + jitterMs);
+    this.log('Peer failure cooldown', { peerId, reason, failures: next, backoffMs });
   }
 
   async init(): Promise<void> {
@@ -103,6 +136,8 @@ export class PartialMesh {
       signalingUrl = url.toString();
     }
 
+    this.log('Using signaling URL', signalingUrl, 'session', this.config.sessionId);
+
     this.uniwrtcClient = new UniWRTCClient(signalingUrl, {
       autoReconnect: true,
       reconnectDelay: 3000,
@@ -112,6 +147,7 @@ export class PartialMesh {
       const rawClientId = data?.clientId;
       this.clientId = this.normalizePeerId(rawClientId);
       this.emit('signaling:connected', { clientId: this.clientId, rawClientId });
+      this.log('Signaling connected as', this.clientId);
 
       if (this.config.autoDiscover) {
         this.uniwrtcClient.joinSession(this.config.sessionId);
@@ -124,10 +160,12 @@ export class PartialMesh {
 
     this.uniwrtcClient.on('disconnected', () => {
       this.emit('signaling:disconnected');
+      this.log('Signaling disconnected');
     });
 
     this.uniwrtcClient.on('joined', (data: { sessionId: string; clients: string[] }) => {
       const selfId = this.normalizePeerId(this.clientId);
+      this.log('Joined session', data.sessionId, 'with peers', data.clients?.length ?? 0);
       data.clients.forEach((rawPeerId: string) => {
         const peerId = this.normalizePeerId(rawPeerId);
         if (peerId && peerId !== selfId) {
@@ -146,6 +184,7 @@ export class PartialMesh {
       if (peerId && peerId !== selfId) {
         this.discoveredPeers.add(peerId);
         this.emit('peer:discovered', peerId);
+        this.log('Peer joined', peerId);
         if (this.config.autoConnect) {
           this.maintainPeerConnections();
         }
@@ -157,22 +196,27 @@ export class PartialMesh {
       if (!peerId) return;
       this.discoveredPeers.delete(peerId);
       this.removePeer(peerId, true);
+      this.log('Peer left', peerId);
     });
 
     this.uniwrtcClient.on('offer', async (data: { peerId: string; offer: RTCSessionDescriptionInit }) => {
+      this.log('Received offer from', data.peerId);
       await this.handleOffer(data.peerId, data.offer);
     });
 
     this.uniwrtcClient.on('answer', async (data: { peerId: string; answer: RTCSessionDescriptionInit }) => {
+      this.log('Received answer from', data.peerId);
       await this.handleAnswer(data.peerId, data.answer);
     });
 
     this.uniwrtcClient.on('ice-candidate', async (data: { peerId: string; candidate: RTCIceCandidateInit }) => {
+      this.log('Received ice-candidate from', data.peerId);
       await this.handleIceCandidate(data.peerId, data.candidate);
     });
 
     this.uniwrtcClient.on('error', (error: any) => {
       this.emit('signaling:error', error);
+      this.log('Signaling error', error);
     });
 
     await this.uniwrtcClient.connect();
@@ -275,7 +319,7 @@ export class PartialMesh {
     }
 
     if (!peerConnection) {
-      peerConnection = this.createPeerConnection(normalizedPeerId, false);
+      peerConnection = await this.createPeerConnection(normalizedPeerId, false);
     }
 
     try {
@@ -315,12 +359,15 @@ export class PartialMesh {
     }
   }
 
-  private createPeerConnection(peerId: string, initiator: boolean): PeerConnection {
+  private async createPeerConnection(peerId: string, initiator: boolean): Promise<PeerConnection> {
+    const SimplePeer = await getSimplePeer();
     const peer = new SimplePeer({
       initiator,
-      trickle: true,
+      trickle: this.config.trickle,
       config: { iceServers: this.config.iceServers },
     });
+
+    this.log('Creating peer connection', { peerId, initiator, trickle: this.config.trickle });
 
     const peerConnection: PeerConnection = {
       id: peerId,
@@ -337,6 +384,8 @@ export class PartialMesh {
       if (current.peer.destroyed) return;
       this.connecting.delete(peerId);
       this.emit('peer:error', { peerId, error: new Error('Connection timeout') });
+      this.markPeerFailure(peerId, 'timeout');
+      this.log('Connection timeout', peerId);
       try {
         current.peer.destroy();
       } catch {
@@ -348,10 +397,13 @@ export class PartialMesh {
 
     peer.on('signal', (signal: any) => {
       if (signal.type === 'offer') {
+        this.log('Sending offer to', peerId);
         this.uniwrtcClient.sendOffer(signal, peerId);
       } else if (signal.type === 'answer') {
+        this.log('Sending answer to', peerId);
         this.uniwrtcClient.sendAnswer(signal, peerId);
       } else if (signal.candidate) {
+        this.log('Sending candidate to', peerId);
         this.uniwrtcClient.sendIceCandidate(signal.candidate, peerId);
       }
     });
@@ -365,6 +417,7 @@ export class PartialMesh {
         this.connectionTimers.delete(peerId);
       }
       this.emit('peer:connected', peerId);
+      this.log('Peer connected', peerId);
       if (this.config.autoConnect) {
         this.maintainPeerConnections();
       }
@@ -378,16 +431,21 @@ export class PartialMesh {
     });
 
     peer.on('close', () => {
+      this.log('Peer closed', peerId);
       this.connecting.delete(peerId);
       const t = this.connectionTimers.get(peerId);
       if (t) {
         clearTimeout(t);
         this.connectionTimers.delete(peerId);
       }
+      if (!peerConnection.connected) {
+        this.markPeerFailure(peerId, 'closed-before-connect');
+      }
       this.removePeer(peerId);
     });
 
     peer.on('error', (err: any) => {
+      this.log('Peer error', peerId, err);
       this.connecting.delete(peerId);
       const t = this.connectionTimers.get(peerId);
       if (t) {
@@ -395,6 +453,7 @@ export class PartialMesh {
         this.connectionTimers.delete(peerId);
       }
       this.emit('peer:error', { peerId, error: err });
+      this.markPeerFailure(peerId, String(err?.message ?? 'error'));
       this.removePeer(peerId);
     });
 
@@ -410,7 +469,7 @@ export class PartialMesh {
     if (totalInProgress < this.config.minPeers) {
       const needed = this.config.minPeers - totalInProgress;
       const available = Array.from(this.discoveredPeers).filter(
-        (peerId) => !this.peers.has(peerId) && !this.connecting.has(peerId),
+        (peerId) => !this.peers.has(peerId) && !this.connecting.has(peerId) && !this.isCoolingDown(peerId),
       );
       if (available.length === 0) return;
       const selfId = this.normalizePeerId(this.clientId);
@@ -436,10 +495,13 @@ export class PartialMesh {
     }
   }
 
-  public connectToPeer(peerId: string): void {
+  public async connectToPeer(peerId: string): Promise<void> {
     const selfId = this.normalizePeerId(this.clientId);
     const normalizedPeerId = this.normalizePeerId(peerId);
     if (!normalizedPeerId || this.peers.has(normalizedPeerId) || this.connecting.has(normalizedPeerId) || normalizedPeerId === selfId) {
+      return;
+    }
+    if (this.isCoolingDown(normalizedPeerId)) {
       return;
     }
     if (this.peers.size >= this.config.maxPeers) {
@@ -448,7 +510,7 @@ export class PartialMesh {
     }
     const initiator = selfId ? selfId < normalizedPeerId : true;
     this.connecting.add(normalizedPeerId);
-    this.createPeerConnection(normalizedPeerId, initiator);
+    await this.createPeerConnection(normalizedPeerId, initiator);
   }
 
   public disconnectFromPeer(peerId: string): void {

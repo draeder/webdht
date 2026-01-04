@@ -5,7 +5,6 @@
 
 import WebDHT from "./index.js";
 import Logger from './logger.js';
-import transportManager from "../transports/index.js";
 
 // Keep track of connected peers for demo/logging
 const connectedPeers = new Set();
@@ -172,57 +171,9 @@ export function initializeApi(dht, adapter, debug = false) {
 
       // Use DHT routing if we have sufficient connections and target is in routing table
       const minConnectionsForDHT = 3;
-      const MAX_CONNECTIONS = 5;
-// Track connection states and metadata
-const connectionStates = new Map();
-const connectionMetadata = new Map();
+      const hasSufficientConnections = dhtInstance.peers.size >= minConnectionsForDHT;
 
-const hasSufficientConnections = dhtInstance.peers.size >= minConnectionsForDHT && dhtInstance.peers.size <= MAX_CONNECTIONS;
-// Prune farthest connections when over limit
-if (dhtInstance.peers.size > MAX_CONNECTIONS) {
-  const peersArray = Array.from(dhtInstance.peers.keys());
-  peersArray
-    .sort((a, b) => dhtInstance.routingTable.distance(b) - dhtInstance.routingTable.distance(a))
-    .slice(MAX_CONNECTIONS)
-    .forEach(id => dhtInstance.disconnectPeer(id));
-}
-      // Enhanced routing table validation
-const knowsTarget = dhtInstance.routingTable.contains(targetPeerId) && 
-  dhtInstance.routingTable.get(targetPeerId).lastSeen > Date.now() - 30000; // Peer seen in last 30s
-      
-      // Validate DHT route before attempting
-const routeValid = await validateRoute(targetPeerId);
-
-if (hasSufficientConnections && knowsTarget && routeValid) {
-  connectionStates.set(targetPeerId, 'dht_attempt');
-  connectionMetadata.set(targetPeerId, {
-    type: 'dht',
-    timestamp: Date.now(),
-    attempts: (connectionMetadata.get(targetPeerId)?.attempts || 0) + 1
-  });
-        _logDebug?.(`API: Routing signal via DHT to ${targetPeerId.substr(0, 8)}... (${dhtInstance.peers.size} connections)`);
-        try {
-          await dhtInstance.sendSignal(targetPeerId, data.signal);
-          activeTransport.send?.({
-            type: "dht_signal_report",
-            source: dhtInstance.nodeId,
-            target: targetPeerId
-          });
-          return;
-        } catch (err) {
-          _logDebug?.(`DHT routing failed: ${err.message}`);
-        }
-      }
-
-      // Cascade fallback with route validation
-connectionStates.set(targetPeerId, 'server_fallback');
-connectionMetadata.set(targetPeerId, {
-  type: 'server',
-  timestamp: Date.now(),
-  fallbackReason: !routeValid ? 'invalid_route' : 'insufficient_peers'
-});
-
-// Fallback to server signaling
+      // Fallback to server signaling
       _logDebug?.(`API: Using server signaling for ${targetPeerId.substr(0, 8)}...`);
 
       // For established peers, try DHT routing (simplified for now, needs full logic)
@@ -304,34 +255,22 @@ connectionMetadata.set(targetPeerId, {
         }
 
         // Exponential backoff implementation
-const retryCount = pendingConnections.get(targetPeerId)?.retries || 0;
-// Enhanced fallback validation
-const delay = calculateFallbackDelay(retryCount, connectionMetadata.get(targetPeerId));
+        const retryCount = pendingConnections.get(targetPeerId)?.retries || 0;
+        const baseDelay = Math.min(1000 * Math.pow(2, retryCount), 30000);
 
-function calculateFallbackDelay(retries, metadata) {
-  const baseDelay = Math.min(1000 * Math.pow(2, retries), 30000);
-  return metadata?.fallbackReason === 'invalid_route' ? baseDelay * 2 : baseDelay;
-}
-
-function validateRoute(targetId) {
-  const entry = dhtInstance.routingTable.get(targetId);
-  return entry && 
-    Date.now() - entry.lastSeen < 45000 &&
-    entry.connectionQuality > 0.7;
-}
-
-if (retryCount < 3) {
-  _logDebug?.(`API: Server fallback attempt ${retryCount + 1} for ${targetPeerId.substr(0, 8)}... (delay: ${delay}ms)`);
-  
-  pendingConnections.set(targetPeerId, {
-    timeoutId: setTimeout(() => {
-      activeTransport.signal(targetPeerId, data.signal);
-    }, delay),
-    retries: retryCount + 1
-  });
-} else {
-  _logDebug?.(`API: Max fallback attempts reached for ${targetPeerId.substr(0, 8)}...`);
-}
+        if (retryCount < 3) {
+          _logDebug?.(`API: Server fallback attempt ${retryCount + 1} for ${targetPeerId.substr(0, 8)}... (delay: ${baseDelay}ms)`);
+          
+          pendingConnections.set(targetPeerId, {
+            timeoutId: setTimeout(() => {
+              activeTransport.signal(targetPeerId, data.signal);
+            }, baseDelay),
+            retries: retryCount + 1
+          });
+        } else {
+          _logDebug?.(`API: Max fallback attempts reached for ${targetPeerId.substr(0, 8)}...`);
+          activeTransport.signal(targetPeerId, data.signal);
+        }
         
         // Report server signal
         activeTransport.send?.({
@@ -505,14 +444,6 @@ export function createTransport(transport, options = {}) {
   }
   
   throw new Error("Invalid transport parameter. Must be a transport name string or transport instance");
-}
-
-/**
- * Get a list of all available transports
- * @returns {string[]} Array of transport names
- */
-export function getAvailableTransports() {
-  return transportManager.getAvailableTransports();
 }
 
 /**
