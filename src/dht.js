@@ -17,6 +17,7 @@ import {
   Buffer,
 } from "./utils.js";
 import Logger from './logger.js';
+import { IDB_STORES, idbDelete, idbGetAll, idbSet, isIndexedDbAvailable } from './idb.js';
 
 // Default Kademlia constants
 const DEFAULT_K = 20; // Default size of k-buckets
@@ -268,6 +269,70 @@ class DHT extends EventEmitter {
     this._initialize(options);
   }
 
+  async _loadPersistedStorage() {
+    if (!this._persistToIndexedDb || !isIndexedDbAvailable()) return;
+    try {
+      const records = await idbGetAll(IDB_STORES.DHT);
+      if (!Array.isArray(records) || records.length === 0) return;
+
+      for (const rec of records) {
+        if (!rec || typeof rec !== 'object') continue;
+        const keyHashHex = String(rec.key || '').trim();
+        if (!/^[a-fA-F0-9]{40}$/.test(keyHashHex)) continue;
+
+        const timestamp = typeof rec.timestamp === 'number' ? rec.timestamp : Date.now();
+        const meta = rec.meta && typeof rec.meta === 'object' ? rec.meta : null;
+
+        this.storage.set(keyHashHex, {
+          value: rec.value,
+          timestamp,
+          replicatedTo: new Set(),
+          ...(meta ? { meta } : {}),
+        });
+        this.storageTimestamps.set(keyHashHex, timestamp);
+        if (typeof rec.originalKey === 'string' && rec.originalKey) {
+          this.keyMapping.set(keyHashHex, rec.originalKey);
+        }
+      }
+
+      // Enforce storage limit and keep IndexedDB in sync.
+      if (this.storage.size > this.MAX_STORE_SIZE) {
+        const entries = Array.from(this.storageTimestamps.entries()).sort((a, b) => a[1] - b[1]);
+        const overflow = entries.length - this.MAX_STORE_SIZE;
+        for (let i = 0; i < overflow; i++) {
+          const [oldKey] = entries[i];
+          this.storage.delete(oldKey);
+          this.storageTimestamps.delete(oldKey);
+          this.keyMapping.delete(oldKey);
+          await idbDelete(IDB_STORES.DHT, oldKey);
+        }
+      }
+    } catch (err) {
+      this._logDebug('IndexedDB load failed:', err);
+    }
+  }
+
+  async _persistRecord(keyHashHex) {
+    if (!this._persistToIndexedDb || !isIndexedDbAvailable()) return;
+    try {
+      const stored = this.storage.get(keyHashHex);
+      if (!stored) {
+        await idbDelete(IDB_STORES.DHT, keyHashHex);
+        return;
+      }
+      const record = {
+        key: keyHashHex,
+        value: stored.value,
+        timestamp: stored.timestamp,
+        meta: stored.meta || null,
+        originalKey: this.keyMapping.get(keyHashHex) || null,
+      };
+      await idbSet(IDB_STORES.DHT, keyHashHex, record);
+    } catch (err) {
+      this._logDebug('IndexedDB persist failed:', err);
+    }
+  }
+
   /**
    * Initialize the DHT node asynchronously
    * @private
@@ -315,6 +380,13 @@ class DHT extends EventEmitter {
       this.storageTimestamps = new Map();
       this.keyMapping = new Map(); // Map from hash to original key name
 
+      // Persist stored values across reloads (browser only)
+      this._persistToIndexedDb = options.persistToIndexedDb !== false;
+      await this._loadPersistedStorage();
+
+      // Storage space support (namespacing + basic policy enforcement)
+      this.STORAGE_SPACES = new Set(["public", "user", "private", "frozen"]);
+
       // Initialize peer connections
       this.peers = new Map();
       
@@ -330,6 +402,7 @@ class DHT extends EventEmitter {
         FIND_NODE: this._handleFindNode.bind(this),
         FIND_VALUE: this._handleFindValue.bind(this),
         STORE: this._handleStore.bind(this),
+        DELETE: this._handleDelete.bind(this),
         SIGNAL: this._handleSignal.bind(this),
       };
 
@@ -1447,8 +1520,31 @@ class DHT extends EventEmitter {
 
     // Check local storage first
     if (this.storage.has(keyHashHex)) {
-      const value = this.storage.get(keyHashHex).value;
-      if (typeof value !== "undefined") {
+      const stored = this.storage.get(keyHashHex);
+      const meta = stored?.meta;
+
+      // Enforce basic space policy on responses.
+      // NOTE: This is best-effort only; there is no cryptographic identity binding.
+      if (meta && (meta.space === "private" || meta.space === "user")) {
+        const owner = meta.owner;
+        if (owner && message.sender !== owner) {
+          // Treat as not found for non-owner.
+          // Fall through to the closest-nodes response.
+        } else {
+          const value = stored?.value;
+          if (typeof value !== "undefined") {
+            peer.send({
+              type: "FIND_VALUE_RESPONSE",
+              sender: this.nodeIdHex,
+              value: value,
+              key: keyHashHex,
+            });
+            return;
+          }
+        }
+      } else {
+        const value = stored?.value;
+        if (typeof value !== "undefined") {
         peer.send({
           type: "FIND_VALUE_RESPONSE",
           sender: this.nodeIdHex,
@@ -1456,6 +1552,7 @@ class DHT extends EventEmitter {
           key: keyHashHex,
         });
         return;
+      }
       }
     }
 
@@ -1588,6 +1685,74 @@ class DHT extends EventEmitter {
       }
     }
 
+    // Optional storage space metadata
+    const meta =
+      message && typeof message.meta === "object" && message.meta
+        ? { ...message.meta }
+        : null;
+
+    // Basic policy enforcement for spaces. This is *not* secure without signatures,
+    // but provides a consistent local/remote rule set.
+    if (meta && meta.space) {
+      const space = String(meta.space);
+      if (!this.STORAGE_SPACES.has(space)) {
+        peer.send({
+          type: "STORE_RESPONSE",
+          sender: this.nodeIdHex,
+          success: false,
+          key: keyStr,
+          error: "Invalid storage space",
+        });
+        return;
+      }
+
+      if ((space === "private" || space === "user") && meta.owner) {
+        // Only allow the owner to write, and require sender consistency.
+        if (meta.owner !== message.sender || peerId !== message.sender) {
+          peer.send({
+            type: "STORE_RESPONSE",
+            sender: this.nodeIdHex,
+            success: false,
+            key: keyStr,
+            error: "Not allowed to write to this space",
+          });
+          return;
+        }
+      }
+
+      if (space === "frozen") {
+        // First write wins (idempotent if same value).
+        const existing = this.storage.get(keyHashHex);
+        if (existing && existing.value !== undefined) {
+          const sameValue = (() => {
+            try {
+              if (existing.value === value) return true;
+              const a =
+                typeof existing.value === "string"
+                  ? existing.value
+                  : JSON.stringify(existing.value);
+              const b =
+                typeof value === "string" ? value : JSON.stringify(value);
+              return a === b;
+            } catch {
+              return false;
+            }
+          })();
+
+          if (!sameValue) {
+            peer.send({
+              type: "STORE_RESPONSE",
+              sender: this.nodeIdHex,
+              success: false,
+              key: keyStr,
+              error: "Frozen key already set",
+            });
+            return;
+          }
+        }
+      }
+    }
+
     // Store the value
     // Store with metadata structure for consistency with put() method
     const timestamp = Date.now();
@@ -1595,9 +1760,11 @@ class DHT extends EventEmitter {
       value,
       timestamp,
       replicatedTo: new Set(),
+      ...(meta ? { meta } : {}),
     });
     this.storageTimestamps.set(keyHashHex, timestamp);
     this.keyMapping.set(keyHashHex, keyStr); // Store original key name
+    await this._persistRecord(keyHashHex);
 
     // Enforce storage size limit
     if (this.storage.size > this.MAX_STORE_SIZE) {
@@ -1615,6 +1782,7 @@ class DHT extends EventEmitter {
         this.storage.delete(oldestKey);
         this.storageTimestamps.delete(oldestKey);
         this.keyMapping.delete(oldestKey); // Clean up key mapping
+        await this._persistRecord(oldestKey);
       }
     }
 
@@ -1625,6 +1793,53 @@ class DHT extends EventEmitter {
       success: true,
       key: keyStr,
     });
+  }
+
+  /**
+   * Handle a DELETE message from a peer
+   * @param {Object} message - Message object
+   * @param {string} peerId - Sender peer ID
+   * @private
+   */
+  async _handleDelete(message, peerId) {
+    const keyHashHex = message.key;
+    
+    this._logDebug(`Received DELETE message from ${peerId.substring(0, 8)}... for key: ${keyHashHex.substring(0, 8)}`);
+
+    // Add sender to routing table
+    this._addNode({
+      id: hexToBuffer(message.sender),
+      host: null,
+      port: null,
+    });
+
+    const keyBuffer = hexToBuffer(keyHashHex);
+    const peer = this.peers.get(peerId);
+
+    if (!peer) {
+      this._logDebug(`Received DELETE from unknown peer: ${peerId}`);
+      return;
+    }
+
+    // Delete from local storage
+    this.storage.delete(keyHashHex);
+    this.storageTimestamps.delete(keyHashHex);
+    this.keyMapping.delete(keyHashHex);
+
+    // Persist deletion
+    await this._persistRecord(keyHashHex);
+
+    this._logDebug(`Deleted key: ${keyHashHex.substring(0, 8)} per request from ${peerId.substring(0, 8)}...`);
+
+    // Send confirmation if peer is connected
+    if (peer && peer.connected) {
+      peer.send({
+        type: "DELETE_RESPONSE",
+        sender: this.nodeIdHex,
+        success: true,
+        key: keyHashHex,
+      });
+    }
   }
   
   /**
@@ -2129,6 +2344,7 @@ class DHT extends EventEmitter {
         this.storage.delete(oldestKey);
         this.storageTimestamps.delete(oldestKey);
         this.keyMapping.delete(oldestKey); // Clean up key mapping
+        await this._persistRecord(oldestKey);
       }
     }
 
@@ -2146,6 +2362,7 @@ class DHT extends EventEmitter {
     });
     this.storageTimestamps.set(keyHashHex, timestamp);
     this.keyMapping.set(keyHashHex, keyStr); // Store original key name
+    await this._persistRecord(keyHashHex);
 
     // Find K closest nodes to the key
     const nodes = await this.findNode(keyHashHex);
@@ -2249,6 +2466,7 @@ class DHT extends EventEmitter {
         this.storage.delete(keyHashHex);
         this.storageTimestamps.delete(keyHashHex);
         this.keyMapping.delete(keyHashHex); // Clean up key mapping
+        await this._persistRecord(keyHashHex);
       }
     }
 
@@ -2335,6 +2553,7 @@ class DHT extends EventEmitter {
         });
         this.storageTimestamps.set(keyHashHex, timestamp);
         this.keyMapping.set(keyHashHex, key); // Store original key name
+        await this._persistRecord(keyHashHex);
         return result;
       }
     }
@@ -2342,11 +2561,173 @@ class DHT extends EventEmitter {
     this._logDebug(`get - No value found for key: ${key} in DHT`);
     return null;
   }
-  
+
   /**
-   * Replicate data to K closest nodes for each key
-   * @private
+   * Delete a value from the DHT
+   * @param {string} key - Key to delete
+   * @return {Promise<boolean>} True if deletion was successful
    */
+  async delete(key) {
+    // Hash the key unless it's already a hash
+    const keyHashHex = /^[a-fA-F0-9]{40}$/.test(key)
+      ? key
+      : bufferToHex(await sha1(key));
+
+    this._logDebug(`delete - Attempting to delete key: ${key}, hash: ${keyHashHex}`);
+
+    // Remove from local storage
+    const existed = this.storage.has(keyHashHex);
+    this.storage.delete(keyHashHex);
+    this.storageTimestamps.delete(keyHashHex);
+    this.keyMapping.delete(keyHashHex);
+
+    // Persist deletion
+    await this._persistRecord(keyHashHex);
+
+    // Notify K closest nodes to delete this key
+    const keyBuffer = hexToBuffer(keyHashHex);
+    let closestNodes = [];
+
+    for (let i = 0; i < this.BUCKET_COUNT; i++) {
+      closestNodes = closestNodes.concat(this.buckets[i].nodes);
+    }
+
+    closestNodes = closestNodes
+      .filter((n) => {
+        const nIdHex = typeof n.id === "string" ? n.id : bufferToHex(n.id);
+        return nIdHex !== this.nodeIdHex && this.peers.has(nIdHex);
+      })
+      .sort((a, b) => {
+        const distA = distance(a.id, keyBuffer);
+        const distB = distance(b.id, keyBuffer);
+        return compareBuffers(distA, distB);
+      })
+      .slice(0, this.K);
+
+    this._logDebug(`delete - Notifying ${closestNodes.length} nodes to delete key: ${key}`);
+
+    // Send DELETE message to all K closest nodes
+    closestNodes.forEach((node) => {
+      const nodeIdHex = typeof node.id === "string" ? node.id : bufferToHex(node.id);
+      const peer = this.peers.get(nodeIdHex);
+
+      if (peer && peer.connected) {
+        peer.send({
+          type: "DELETE",
+          sender: this.nodeIdHex,
+          key: keyHashHex,
+        });
+      }
+    });
+
+    if (existed) {
+      this._logDebug(`delete - Successfully deleted key: ${key}`);
+    } else {
+      this._logDebug(`delete - Key not found in storage: ${key}`);
+    }
+
+    return existed;
+  }
+
+  /**
+   * Update a value in the DHT (shorthand for put with existing TTL)
+   * @param {string} key - Key to update
+   * @param {any} value - New value
+   * @return {Promise<boolean>} True if update was successful
+   */
+  async update(key, value) {
+    this._logDebug(`update - Updating key: ${key}`);
+
+    // Get existing TTL if available, otherwise use default
+    const keyHashHex = /^[a-fA-F0-9]{40}$/.test(key)
+      ? key
+      : bufferToHex(await sha1(key));
+
+    const existingRecord = this.storage.get(keyHashHex);
+    const existingTtl = existingRecord?.ttl || null;
+
+    // Use put() which handles replication
+    const result = await this.put(key, value);
+
+    if (result) {
+      this._logDebug(`update - Successfully updated key: ${key}`);
+    } else {
+      this._logDebug(`update - Failed to update key: ${key}`);
+    }
+
+    return result;
+  }
+
+  /**
+   * Check if a key exists in the DHT
+   * @param {string} key - Key to check
+   * @return {Promise<boolean>} True if key exists
+   */
+  async exists(key) {
+    const keyHashHex = /^[a-fA-F0-9]{40}$/.test(key)
+      ? key
+      : bufferToHex(await sha1(key));
+
+    // Check local storage first
+    if (this.storage.has(keyHashHex)) {
+      return this.storage.get(keyHashHex).value !== undefined;
+    }
+
+    // Try to get from DHT
+    const value = await this.get(key);
+    return value !== null && value !== undefined;
+  }
+
+  /**
+   * Get all keys currently stored
+   * @return {Promise<string[]>} Array of original key names
+   */
+  async keys() {
+    const allKeys = [];
+    for (const [keyHashHex, storedData] of this.storage.entries()) {
+      if (storedData.value !== undefined) {
+        const originalKey = this.keyMapping.get(keyHashHex) || keyHashHex;
+        allKeys.push(originalKey);
+      }
+    }
+    return allKeys;
+  }
+
+  /**
+   * Get all key-value pairs currently stored
+   * @return {Promise<Object>} Object with all key-value pairs
+   */
+  async entries() {
+    const allEntries = {};
+    for (const [keyHashHex, storedData] of this.storage.entries()) {
+      if (storedData.value !== undefined) {
+        const originalKey = this.keyMapping.get(keyHashHex) || keyHashHex;
+        allEntries[originalKey] = storedData.value;
+      }
+    }
+    return allEntries;
+  }
+
+  /**
+   * Clear all data from local storage (doesn't affect network)
+   * @return {Promise<void>}
+   */
+  async clear() {
+    this._logDebug('clear - Clearing all local storage');
+    const keysToDelete = Array.from(this.storage.keys());
+    
+    this.storage.clear();
+    this.storageTimestamps.clear();
+    this.keyMapping.clear();
+
+    // Clear from IndexedDB
+    if (isIndexedDbAvailable()) {
+      for (const keyHashHex of keysToDelete) {
+        await idbDelete(IDB_STORES.DHT, keyHashHex);
+      }
+    }
+  }
+  
   _replicateData() {
     this._logDebug("Starting data replication..."); // Use _logDebug
     this.storage.forEach(async (storedData, keyHashHex) => {
@@ -2371,6 +2752,7 @@ class DHT extends EventEmitter {
             sender: this.nodeIdHex,
             key: originalKey, // Use original key name for replication
             value: storedData.value, // Send only the value, not the metadata
+            ...(storedData.meta ? { meta: storedData.meta } : {}),
           });
         }
       });
@@ -2395,6 +2777,7 @@ class DHT extends EventEmitter {
             sender: this.nodeIdHex,
             key: originalKey, // Use original key name for republication
             value: storedData.value, // Send only the value, not the metadata
+            ...(storedData.meta ? { meta: storedData.meta } : {}),
           });
         }
       });
@@ -2436,10 +2819,166 @@ class DHT extends EventEmitter {
             sender: this.nodeIdHex,
             key: originalKey, // Use original key name for replication
             value: storedData.value, // Send only the value, not the metadata
+            ...(storedData.meta ? { meta: storedData.meta } : {}),
           });
         }
       }
     }
+  }
+
+  /**
+   * Build a deterministic, namespaced key for a storage space.
+   * This is intentionally simple and compatible with existing SHA1 hashing.
+   * @private
+   */
+  _canonicalKeyForSpace(space, key, owner = null) {
+    const s = String(space || "public");
+    const k = String(key);
+    const o = owner || this.nodeIdHex;
+
+    if (!this.STORAGE_SPACES.has(s)) {
+      throw new Error(`Unknown storage space: ${s}`);
+    }
+
+    switch (s) {
+      case "public":
+        return `public:${k}`;
+      case "user":
+        return `user:${o}:${k}`;
+      case "private":
+        return `private:${o}:${k}`;
+      case "frozen":
+        return `frozen:${k}`;
+      default:
+        return `public:${k}`;
+    }
+  }
+
+  /**
+   * Store a value in a named storage space.
+   * - public: readable/writable by anyone
+   * - user: readable/writable only by owner (best-effort)
+   * - private: readable/writable only by owner (best-effort)
+   * - frozen: first write wins (immutable)
+   */
+  async putInSpace(space, key, value, options = {}) {
+    const owner = options.owner || this.nodeIdHex;
+    const canonicalKey = this._canonicalKeyForSpace(space, key, owner);
+
+    // Enforce frozen locally (first write wins)
+    if (String(space) === "frozen") {
+      const keyHashHex = bufferToHex(await sha1(canonicalKey));
+      const existing = this.storage.get(keyHashHex);
+      if (existing && existing.value !== undefined) {
+        const sameValue = (() => {
+          try {
+            if (existing.value === value) return true;
+            const a =
+              typeof existing.value === "string"
+                ? existing.value
+                : JSON.stringify(existing.value);
+            const b = typeof value === "string" ? value : JSON.stringify(value);
+            return a === b;
+          } catch {
+            return false;
+          }
+        })();
+        if (!sameValue) return false;
+      }
+    }
+
+    // Use existing put logic but include metadata in the STORE messages.
+    // We do this by performing a minimal inline variant here.
+    const keySize = Buffer.from(canonicalKey).length;
+    const valueSize =
+      typeof value === "string"
+        ? Buffer.from(value).length
+        : Buffer.from(JSON.stringify(value)).length;
+
+    if (keySize > this.MAX_KEY_SIZE) {
+      throw new Error(`Key size exceeds maximum (${this.MAX_KEY_SIZE} bytes)`);
+    }
+    if (valueSize > this.MAX_VALUE_SIZE) {
+      throw new Error(`Value size exceeds maximum (${this.MAX_VALUE_SIZE} bytes)`);
+    }
+
+    if (this.storage.size >= this.MAX_STORE_SIZE) {
+      const oldestKey = Array.from(this.storageTimestamps.keys()).sort(
+        (a, b) => this.storageTimestamps.get(a) - this.storageTimestamps.get(b)
+      )[0];
+      if (oldestKey) {
+        this.storage.delete(oldestKey);
+        this.storageTimestamps.delete(oldestKey);
+        this.keyMapping.delete(oldestKey);
+        await this._persistRecord(oldestKey);
+      }
+    }
+
+    const keyHashHex = bufferToHex(await sha1(canonicalKey));
+    const timestamp = Date.now();
+    const meta = {
+      space: String(space || "public"),
+      owner,
+    };
+
+    this.storage.set(keyHashHex, {
+      value,
+      timestamp,
+      replicatedTo: new Set(),
+      meta,
+    });
+    this.storageTimestamps.set(keyHashHex, timestamp);
+    this.keyMapping.set(keyHashHex, canonicalKey);
+    await this._persistRecord(keyHashHex);
+
+    const nodes = await this.findNode(keyHashHex);
+    if (nodes.length === 0) return true;
+
+    const promises = nodes.map(async (node) => {
+      const peer = this.peers.get(node.id);
+      if (!peer || !peer.connected) return false;
+
+      return new Promise((resolve) => {
+        const timeout = setTimeout(() => resolve(false), 5000);
+
+        const responseHandler = (message, sender) => {
+          if (
+            sender !== node.id ||
+            message.type !== "STORE_RESPONSE" ||
+            message.key !== canonicalKey
+          ) {
+            return;
+          }
+          clearTimeout(timeout);
+          peer.removeListener("message", responseHandler);
+
+          if (message.success) {
+            const stored = this.storage.get(keyHashHex);
+            if (stored) stored.replicatedTo.add(node.id);
+          }
+          resolve(Boolean(message.success));
+        };
+
+        peer.on("message", responseHandler);
+        peer.send({
+          type: "STORE",
+          sender: this.nodeIdHex,
+          key: canonicalKey,
+          value,
+          meta,
+        });
+      });
+    });
+
+    const results = await Promise.all(promises);
+    return results.some(Boolean);
+  }
+
+  /** Retrieve a value from a named storage space. */
+  async getFromSpace(space, key, options = {}) {
+    const owner = options.owner || this.nodeIdHex;
+    const canonicalKey = this._canonicalKeyForSpace(space, key, owner);
+    return this.get(canonicalKey);
   }
 
   /**
@@ -2604,6 +3143,20 @@ class DHT extends EventEmitter {
       });
     }
     return keys;
+  }
+
+  /**
+   * Handle incoming signal from signaling server
+   * @param {Object} data - Signal data from signaling server
+   */
+  onSignal(data) {
+    if (!data || !data.id || !data.signal) {
+      console.warn('Invalid signal format:', data);
+      return;
+    }
+    
+    // Forward to the internal signal handler
+    this._onIncomingSignal({ id: data.id, signal: data.signal, viaDht: false });
   }
 }
 

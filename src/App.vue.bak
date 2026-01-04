@@ -1,0 +1,552 @@
+<template>
+  <div id="app" class="container">
+    <header class="header">
+      <h1>WebDHT</h1>
+      <div class="node-info">
+        <p>Node ID: <code>{{ nodeIdShort }}</code></p>
+        <p>Connected Peers: <strong>{{ connectedPeers.length }}</strong></p>
+        <p class="status" :class="connected ? 'online' : 'offline'">
+          {{ connected ? '🟢 Online' : '🔴 Offline' }}
+        </p>
+        <button @click="openNewWindow" class="btn btn-primary">🚀 Open 2nd Window to Test</button>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="section settings">
+        <h2>Settings</h2>
+        <div class="settings-group">
+          <label>Signaling Server:</label>
+          <input v-model="signalingServer" type="text" placeholder="wss://signal.peer.ooo" class="input" />
+          <button @click="reconnectSignaling" class="btn">Reconnect</button>
+        </div>
+      </section>
+
+      <section class="section peers">
+        <h2>Connected Peers</h2>
+        <div v-if="connectedPeers.length === 0" class="empty">
+          <p>No connected peers yet. Waiting for peers to join...</p>
+        </div>
+        <ul v-else class="peer-list">
+          <li v-for="peer in connectedPeers" :key="peer" class="peer-item">
+            <span class="peer-id">{{ peer.substring(0, 16) }}...</span>
+          </li>
+        </ul>
+      </section>
+
+      <section class="section messaging">
+        <h2>Messages</h2>
+        <div class="message-box">
+          <div v-if="messages.length === 0" class="empty">
+            <p>No messages yet</p>
+          </div>
+          <div v-else class="messages">
+            <div v-for="(msg, idx) in messages" :key="idx" class="message" :class="msg.outgoing ? 'outgoing' : 'incoming'">
+              <span class="msg-peer">{{ msg.peer.substring(0, 8) }}</span>
+              <span class="msg-text">{{ msg.text }}</span>
+              <span class="msg-time">{{ msg.time }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="message-input">
+          <select v-model="selectedPeer" class="select">
+            <option value="">Broadcast...</option>
+            <option v-for="peer in connectedPeers" :key="peer" :value="peer">
+              {{ peer.substring(0, 12) }}...
+            </option>
+          </select>
+          <input 
+            v-model="messageText" 
+            @keyup.enter="sendMessage"
+            type="text" 
+            placeholder="Type message..." 
+            class="input"
+          />
+          <button @click="sendMessage" class="btn">Send</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>WebDHT - P2P Distributed Hash Table</p>
+    </footer>
+  </div>
+</template>
+
+<script>
+import WebDHT from './index.js'
+import { PartialMesh } from 'gossip-protocol'
+
+export default {
+  name: 'App',
+  data() {
+    return {
+      dht: null,
+      mesh: null,
+      nodeIdShort: '',
+      connectedPeers: [],
+      messages: [],
+      selectedPeer: '',
+      messageText: '',
+      signalingServer: 'wss://signal.peer.ooo/ws',
+      signalingRoom: 'webdht-test',
+      connected: false,
+      signalingWs: null,
+      clientId: null,
+    }
+  },
+  mounted() {
+    this.initDHT()
+  },
+  methods: {
+    initDHT() {
+      this.dht = new WebDHT({
+        bootstrap: [],
+        maxPeers: 10,
+        debug: true
+      })
+
+      const checkReady = setInterval(() => {
+        if (this.dht.nodeId) {
+          clearInterval(checkReady)
+          this.setupDHTHandlers()
+          this.setupMesh()
+        }
+      }, 100)
+    },
+    setupMesh() {
+      this.mesh = new PartialMesh({
+        sessionId: this.signalingRoom,
+        minPeers: 1,
+        maxPeers: 10,
+      })
+
+      this.mesh.on('peer', (peerId, conn) => {
+        console.log('✅ Mesh peer connected:', peerId)
+        this.dht.connect({ id: peerId, initiator: false })
+      })
+
+      this.mesh.on('signal', (peerId, signal) => {
+        console.log('📨 Received signal from', peerId, signal.type)
+        if (this.dht.peers.has(peerId)) {
+          this.dht.peers.get(peerId).signal(signal)
+        } else {
+          this.dht.connect({ id: peerId, signal, initiator: false })
+        }
+      })
+
+      this.mesh.on('disconnect', (peerId) => {
+        console.log('❌ Mesh peer disconnected:', peerId)
+        if (this.dht.peers.has(peerId)) {
+          this.dht.peers.get(peerId).destroy()
+          this.dht.peers.delete(peerId)
+          this.updatePeerList()
+        }
+      })
+
+      this.connected = true
+    },
+    setupDHTHandlers() {
+      const nodeIdHex = this.dht.nodeId.substring(0, 8)
+      this.nodeIdShort = nodeIdHex
+
+      this.dht.on('peer:connect', (peerId) => {
+        console.log('✅ DHT peer connected:', peerId)
+        this.updatePeerList()
+      })
+
+      this.dht.on('peer:disconnect', (peerId) => {
+        console.log('❌ DHT peer disconnected:', peerId)
+        this.updatePeerList()
+      })
+
+      this.dht.on('signal', (data) => {
+        console.log(`📤 Forwarding ${data.signal.type} to ${data.id}`)
+        if (this.mesh) {
+          this.mesh.signal(data.id, data.signal)
+        }
+      })
+    },
+    connectToSignalingServer() {
+      const url = this.signalingServer.startsWith('ws') 
+        ? `${this.signalingServer}?room=${this.signalingRoom}`
+        : `wss://${this.signalingServer}?room=${this.signalingRoom}`
+
+      console.log('Connecting to:', url)
+      try {
+        this.signalingWs = new WebSocket(url)
+
+        this.signalingWs.onopen = () => {
+          console.log('Connected to signaling server')
+          this.connected = true
+          // UniWRTC auto-registers, no need to send REGISTER
+        }
+
+        this.signalingWs.onmessage = (event) => {
+          const msg = JSON.parse(event.data)
+          console.log('Received from signaling server:', msg.type, msg)
+          
+          if (msg.type === 'welcome') {
+            console.log('✅ Registered with signaling server, clientId:', msg.clientId)
+            // Store our client ID from the server
+            this.clientId = msg.clientId
+            
+            // Request existing peers
+            console.log('📡 Requesting peer list...')
+            this.signalingWs.send(JSON.stringify({ type: 'get-peers' }))
+          }
+          
+          if (msg.type === 'peers') {
+            console.log('📋 Received peer list:', msg.peers.length, 'peers:', msg.peers)
+            for (const peerId of msg.peers) {
+              if (peerId !== this.clientId && !this.dht.peers.has(peerId)) {
+                console.log(`🔗 Connecting to existing peer (initiator=true): ${peerId}`)
+                this.dht.connect({ id: peerId, initiator: true })
+              }
+            }
+          }
+          
+          if (msg.type === 'signal') {
+            const peerId = msg.peerId || msg.from
+            console.log(`📨 Processing ${msg.signal?.type} signal from ${peerId}`)
+            if (this.dht.peers.has(peerId)) {
+              this.dht.peers.get(peerId).signal(msg.signal)
+            } else {
+              console.log(`🆕 Creating new peer connection (initiator=false) to ${peerId}`)
+              this.dht.connect({ id: peerId, signal: msg.signal, initiator: false })
+            }
+          }
+
+          if (msg.type === 'peer-joined') {
+            const peerId = msg.peerId
+            console.log(`👋 Peer joined: ${peerId}`)
+            if (peerId !== this.clientId && !this.dht.peers.has(peerId)) {
+              console.log(`🔗 Connecting to new peer (initiator=true): ${peerId}`)
+              this.dht.connect({ id: peerId, initiator: true })
+            }
+          }
+          
+          if (msg.type === 'peer-left') {
+            const peerId = msg.peerId
+            console.log(`Peer left: ${peerId}`)
+            if (this.dht.peers.has(peerId)) {
+              this.dht.peers.get(peerId).destroy()
+              this.dht.peers.delete(peerId)
+              this.updatePeerList()
+            }
+          }
+        }
+
+        this.signalingWs.onerror = (err) => {
+          console.error('Signaling server error:', err)
+          this.connected = false
+        }
+
+        this.signalingWs.onclose = () => {
+          console.log('Disconnected from signaling server')
+          this.connected = false
+        }
+      } catch (err) {
+        console.error('Failed to connect to signaling server:', err)
+        this.connected = false
+      }
+    },
+    openNewWindow() {
+      window.open(window.location.href, '_blank')
+    },
+    reconnectSignaling() {
+      if (this.mesh) {
+        this.mesh.destroy()
+      }
+      this.setupMesh()
+    },
+    updatePeerList() {
+      this.connectedPeers = Array.from(this.dht.peers.keys())
+    },
+    sendMessage() {
+      if (!this.messageText) return
+
+      const msg = {
+        type: 'MESSAGE',
+        text: this.messageText,
+        from: this.dht.nodeId
+      }
+
+      if (this.selectedPeer) {
+        const peer = this.dht.peers.get(this.selectedPeer)
+        if (peer && peer.connected) {
+          peer.send(JSON.stringify(msg))
+        }
+      } else {
+        for (const peer of this.dht.peers.values()) {
+          if (peer.connected) {
+            peer.send(JSON.stringify(msg))
+          }
+        }
+      }
+
+      this.messages.push({
+        peer: this.selectedPeer || 'broadcast',
+        text: this.messageText,
+        outgoing: true,
+        time: new Date().toLocaleTimeString()
+      })
+
+      this.messageText = ''
+    }
+  }
+}
+</script>
+
+<style scoped>
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body, html {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #0a0e27;
+  color: #e0e6ed;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.header {
+  background: linear-gradient(135deg, #1a1f3a 0%, #16213e 100%);
+  padding: 2rem;
+  border-bottom: 1px solid #3a4655;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.header h1 {
+  font-size: 2.5rem;
+  margin-bottom: 1rem;
+  color: #00d4ff;
+  font-weight: 700;
+  letter-spacing: 2px;
+}
+
+.node-info {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1rem;
+}
+
+.node-info p {
+  font-size: 0.95rem;
+  color: #b8c5d6;
+}
+
+.node-info code {
+  background: #0d1b2a;
+  padding: 0.25rem 0.5rem;
+  border-radius: 3px;
+  color: #00d4ff;
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-size: 0.85rem;
+}
+
+.status {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.status.online {
+  color: #00ff88;
+}
+
+.status.offline {
+  color: #ff4444;
+}
+
+.main {
+  flex: 1;
+  padding: 2rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: 2rem;
+}
+
+.section {
+  background: #111827;
+  border: 1px solid #2d3748;
+  border-radius: 8px;
+  padding: 1.5rem;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.section h2 {
+  font-size: 1.5rem;
+  margin-bottom: 1.5rem;
+  color: #00d4ff;
+  border-bottom: 2px solid #00d4ff;
+  padding-bottom: 0.5rem;
+}
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.settings-group label {
+  font-size: 0.95rem;
+  color: #b8c5d6;
+  font-weight: 500;
+}
+
+.input {
+  padding: 0.75rem;
+  background: #0d1b2a;
+  border: 1px solid #2d3748;
+  border-radius: 4px;
+  color: #e0e6ed;
+  font-size: 0.95rem;
+}
+
+.input:focus {
+  outline: none;
+  border-color: #00d4ff;
+  box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.1);
+}
+
+.btn {
+  padding: 0.75rem 1.5rem;
+  background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%);
+  border: none;
+  border-radius: 4px;
+  color: #000;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 212, 255, 0.3);
+}
+
+.btn:active {
+  transform: translateY(0);
+}
+
+.empty {
+  padding: 2rem;
+  text-align: center;
+  color: #738aae;
+}
+
+.peer-list {
+  list-style: none;
+}
+
+.peer-item {
+  padding: 0.75rem;
+  background: #0d1b2a;
+  border-left: 3px solid #00d4ff;
+  margin-bottom: 0.5rem;
+  border-radius: 3px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.peer-id {
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-size: 0.85rem;
+  color: #00d4ff;
+}
+
+.message-box {
+  background: #0d1b2a;
+  border: 1px solid #2d3748;
+  border-radius: 4px;
+  height: 300px;
+  overflow-y: auto;
+  margin-bottom: 1rem;
+  padding: 1rem;
+}
+
+.messages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.message {
+  padding: 0.75rem;
+  border-radius: 4px;
+  background: #111827;
+  border-left: 3px solid #738aae;
+}
+
+.message.outgoing {
+  border-left-color: #00ff88;
+  margin-left: 2rem;
+}
+
+.message.incoming {
+  border-left-color: #00d4ff;
+  margin-right: 2rem;
+}
+
+.msg-peer {
+  display: block;
+  font-size: 0.8rem;
+  color: #738aae;
+  margin-bottom: 0.25rem;
+}
+
+.msg-text {
+  display: block;
+  color: #e0e6ed;
+  word-wrap: break-word;
+}
+
+.msg-time {
+  display: block;
+  font-size: 0.75rem;
+  color: #4a5568;
+  margin-top: 0.25rem;
+}
+
+.message-input {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.select {
+  padding: 0.75rem;
+  background: #0d1b2a;
+  border: 1px solid #2d3748;
+  border-radius: 4px;
+  color: #e0e6ed;
+  font-size: 0.95rem;
+  min-width: 150px;
+}
+
+.select:focus {
+  outline: none;
+  border-color: #00d4ff;
+}
+
+.footer {
+  background: #0a0e27;
+  border-top: 1px solid #3a4655;
+  padding: 1.5rem;
+  text-align: center;
+  color: #738aae;
+  font-size: 0.9rem;
+}
+</style>
