@@ -14,6 +14,8 @@ export interface PartialMeshConfig {
   connectionTimeoutMs?: number;
   maintenanceIntervalMs?: number;
   underConnectedResetMs?: number;
+  restartOnBelowMinPeers?: boolean;
+  bootstrapGraceMs?: number;
 }
 
 export interface PeerConnection {
@@ -21,6 +23,7 @@ export interface PeerConnection {
   peer: SimplePeerInstance;
   connected: boolean;
   initiator: boolean;
+  createdAtMs: number;
 }
 
 export type PartialMeshEvents = {
@@ -33,6 +36,7 @@ export type PartialMeshEvents = {
   'peer:error': (data: { peerId: string; error: any }) => void;
   'peer:discovered': (peerId: string) => void;
   'mesh:ready': () => void;
+  'mesh:reset': (data: { reason: string }) => void;
 };
 
 /**
@@ -47,6 +51,7 @@ export class PartialMesh {
   private discoveredPeers: Set<string> = new Set();
   private discoveredPeerLastSeenAtMs: Map<string, number> = new Map();
   private clientId: string | null = null;
+  private selfHash32: number | null = null;
   private eventHandlers: Map<keyof PartialMeshEvents, Set<Function>> = new Map();
   private connecting: Set<string> = new Set();
   private connectionTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
@@ -56,6 +61,12 @@ export class PartialMesh {
   private underConnectedSinceMs: number | null = null;
   private lastHardResetAtMs: number = 0;
   private lastSessionRefreshAtMs: number = 0;
+  private lastShuffleAtMs: number = 0;
+  private lastGrowAtMs: number = 0;
+  private bootstrapGraceUntilMs: number = 0;
+  private everReachedMinPeers: boolean = false;
+  private isHardResetting: boolean = false;
+  private lastBelowMinResetAtMs: number = 0;
 
   constructor(config: PartialMeshConfig = {}) {
     this.config = {
@@ -71,7 +82,14 @@ export class PartialMesh {
       connectionTimeoutMs: config.connectionTimeoutMs ?? 25_000,
       maintenanceIntervalMs: config.maintenanceIntervalMs ?? 2_000,
       underConnectedResetMs: config.underConnectedResetMs ?? 0,
+      restartOnBelowMinPeers: config.restartOnBelowMinPeers ?? false,
+      bootstrapGraceMs: config.bootstrapGraceMs ?? 12_000,
     } as Required<PartialMeshConfig>;
+
+    // Ensure the invariant is achievable.
+    if (this.config.maxPeers < this.config.minPeers) {
+      this.config.maxPeers = this.config.minPeers;
+    }
 
     const events: (keyof PartialMeshEvents)[] = [
       'signaling:connected',
@@ -83,6 +101,7 @@ export class PartialMesh {
       'peer:error',
       'peer:discovered',
       'mesh:ready',
+      'mesh:reset',
     ];
     events.forEach((event) => this.eventHandlers.set(event, new Set()));
   }
@@ -95,6 +114,43 @@ export class PartialMesh {
 
   private normalizePeerId(peerId: string | null | undefined): string {
     return (peerId ?? '').trim();
+  }
+
+  private prefersInitiatorWith(peerId: string): boolean {
+    const selfId = this.normalizePeerId(this.clientId);
+    const other = this.normalizePeerId(peerId);
+    if (!selfId || !other) return false;
+    return selfId < other;
+  }
+
+  // Synchronous, deterministic 32-bit hash for peer IDs.
+  // Used for XOR distance selection (Kademlia-style) without requiring async crypto.
+  private hash32(input: string): number {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < input.length; i++) {
+      h ^= input.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+      h >>>= 0;
+    }
+    return h >>> 0;
+  }
+
+  private xorDistance(peerId: string): number {
+    const self = this.selfHash32;
+    if (self == null) return 0xffffffff;
+    return (self ^ this.hash32(peerId)) >>> 0;
+  }
+
+  private sortByXorDistance(peerIds: string[]): string[] {
+    const ids = peerIds.slice();
+    ids.sort((a, b) => {
+      const da = this.xorDistance(a);
+      const db = this.xorDistance(b);
+      if (da !== db) return da - db;
+      // Stable tie-breaker
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+    return ids;
   }
 
   private isCoolingDown(peerId: string): boolean {
@@ -116,6 +172,62 @@ export class PartialMesh {
     const jitterMs = Math.floor(Math.random() * 500);
     this.peerCooldownUntilMs.set(peerId, now + backoffMs + jitterMs);
     this.log('Peer failure cooldown', { peerId, reason, failures: next, backoffMs });
+  }
+
+  private maybeEagerConnectToDiscoveredPeer(peerId: string, source: string): void {
+    const selfId = this.normalizePeerId(this.clientId);
+    const normalizedPeerId = this.normalizePeerId(peerId);
+    if (!normalizedPeerId || normalizedPeerId === selfId) return;
+    if (this.peers.has(normalizedPeerId) || this.connecting.has(normalizedPeerId)) return;
+    if (this.isCoolingDown(normalizedPeerId)) return;
+
+    // Only nodes that already have at least one direct connection should
+    // proactively pull in joiners. This avoids everyone dialing everyone
+    // simultaneously at cold start, while still letting the mesh grow.
+    if (this.getConnectedPeers().length <= 0) return;
+
+    // Avoid offer/answer glare by ensuring only one side of a pair dials.
+    // If we are not the deterministic initiator for this peer, wait for them.
+    if (!this.prefersInitiatorWith(normalizedPeerId)) return;
+
+    const currentPeerCount = this.peers.size;
+    const connectedCount = this.getConnectedPeers().length;
+
+    // If we have capacity, connect immediately.
+    if (currentPeerCount < this.config.maxPeers) {
+      this.connectToPeer(normalizedPeerId);
+      return;
+    }
+
+    // If we're saturated but have slack above minPeers, swap one out to make room.
+    // This prevents stable cliques from refusing to incorporate late joiners.
+    if (connectedCount > this.config.minPeers) {
+      const connectedIds = this.getConnectedPeers();
+      if (connectedIds.length > 0) {
+        const sorted = this.sortByXorDistance(connectedIds);
+        const dropId = sorted[sorted.length - 1];
+        if (dropId) {
+          this.log('Eager swap for joiner', { source, dropId, joiner: normalizedPeerId });
+          this.disconnectFromPeer(dropId);
+          this.connectToPeer(normalizedPeerId);
+        }
+      }
+      return;
+    }
+
+    // Otherwise: we cannot safely drop (would violate minPeers). Best-effort:
+    // if maxPeers is consumed by stale pending dials, evict one and try.
+    const now = Date.now();
+    const evictAfterMs = 8_000;
+    const pending = Array.from(this.peers.values())
+      .filter((pc) => !pc.connected)
+      .filter((pc) => (now - (pc.createdAtMs || 0)) >= evictAfterMs);
+    pending.sort((a, b) => a.createdAtMs - b.createdAtMs);
+    const pc = pending[0];
+    if (pc) {
+      this.removePeer(pc.id, false, false);
+      this.connectToPeer(normalizedPeerId);
+    }
   }
 
   async init(): Promise<void> {
@@ -148,6 +260,13 @@ export class PartialMesh {
     this.uniwrtcClient.on('connected', (data: { clientId: string }) => {
       const rawClientId = data?.clientId;
       this.clientId = this.normalizePeerId(rawClientId);
+      this.selfHash32 = this.clientId ? this.hash32(this.clientId) : null;
+
+      // It's impossible to satisfy minPeers immediately at startup.
+      // Allow a brief bootstrap window, then enforce invariants.
+      this.bootstrapGraceUntilMs = Date.now() + Math.max(0, this.config.bootstrapGraceMs);
+      this.everReachedMinPeers = false;
+
       this.emit('signaling:connected', { clientId: this.clientId, rawClientId });
       this.log('Signaling connected as', this.clientId);
 
@@ -206,6 +325,7 @@ export class PartialMesh {
       for (const peerId of next) {
         if (!prev.has(peerId)) {
           this.emit('peer:discovered', peerId);
+          this.maybeEagerConnectToDiscoveredPeer(peerId, 'joined');
         }
       }
       if (this.config.autoConnect) {
@@ -221,6 +341,7 @@ export class PartialMesh {
         this.discoveredPeerLastSeenAtMs.set(peerId, Date.now());
         this.emit('peer:discovered', peerId);
         this.log('Peer joined', peerId);
+        this.maybeEagerConnectToDiscoveredPeer(peerId, 'peer-joined');
         if (this.config.autoConnect) {
           this.maintainPeerConnections();
         }
@@ -265,6 +386,7 @@ export class PartialMesh {
     this.maintenanceTimer = setInterval(() => {
       try {
         this.maintainPeerConnections();
+        this.maybeHardResetBelowMinPeers('maintenance');
         this.maybeHardResetUnderConnected();
         this.maybeRefreshSessionPeers();
       } catch {
@@ -273,12 +395,45 @@ export class PartialMesh {
     }, this.config.maintenanceIntervalMs);
   }
 
+  private maybeHardResetBelowMinPeers(trigger: string): void {
+    if (!this.config.restartOnBelowMinPeers) return;
+    if (this.isHardResetting) return;
+    if (!this.clientId) return;
+
+    const connected = this.getConnectedPeers().length;
+    if (connected >= this.config.minPeers) {
+      this.everReachedMinPeers = true;
+      return;
+    }
+
+    const now = Date.now();
+    if (now < this.bootstrapGraceUntilMs) return;
+
+    const cooldownMs = 2_000;
+    if (now - this.lastBelowMinResetAtMs < cooldownMs) return;
+    this.lastBelowMinResetAtMs = now;
+    this.hardReset(`below-minPeers:${trigger}`);
+  }
+
   private maybeRefreshSessionPeers(): void {
     if (!this.uniwrtcClient) return;
     if (!this.config.sessionId) return;
     const now = Date.now();
-    // Refresh at a low frequency to avoid spamming public servers.
-    if (now - this.lastSessionRefreshAtMs < 10_000) return;
+
+    const connected = this.getConnectedPeers().length;
+    const discovered = this.discoveredPeers.size;
+    const underConnected = connected < this.config.minPeers && discovered < this.config.minPeers;
+
+    // On some public signaling servers, incremental peer-joined events can be
+    // delayed or dropped. If we never refresh the session roster, the discovered
+    // set can stagnate at (or near) the connected set, which prevents the UI
+    // from ever showing any indirect peers.
+    const discoveryStalled = discovered <= connected;
+
+    // Refresh more frequently when we're under-connected to speed convergence;
+    // otherwise keep the low frequency to avoid spamming public servers.
+    const refreshIntervalMs = (underConnected || discoveryStalled) ? 2_500 : 10_000;
+    if (now - this.lastSessionRefreshAtMs < refreshIntervalMs) return;
     this.lastSessionRefreshAtMs = now;
     try {
       this.uniwrtcClient.joinSession(this.config.sessionId);
@@ -291,11 +446,13 @@ export class PartialMesh {
     const thresholdMs = this.config.underConnectedResetMs;
     if (!thresholdMs || thresholdMs <= 0) return;
 
-    const connected = this.getConnectedPeers().length;
-    const hasEnoughCandidates = this.discoveredPeers.size >= this.config.minPeers;
-    const underConnected = connected < this.config.minPeers && hasEnoughCandidates;
-
     const now = Date.now();
+    if (now < this.bootstrapGraceUntilMs) return;
+
+    const connected = this.getConnectedPeers().length;
+    const discovered = this.discoveredPeers.size;
+    const hasEnoughCandidates = discovered >= this.config.minPeers;
+    const underConnected = connected < this.config.minPeers;
     if (!underConnected) {
       this.underConnectedSinceMs = null;
       return;
@@ -309,12 +466,23 @@ export class PartialMesh {
     if (now - this.underConnectedSinceMs < thresholdMs) return;
     if (now - this.lastHardResetAtMs < thresholdMs) return;
 
-    this.hardReset('under-connected');
+    this.hardReset(hasEnoughCandidates ? 'under-connected' : 'under-connected-no-candidates');
   }
 
   public hardReset(reason: string = 'manual'): void {
+    if (this.isHardResetting) return;
+    this.isHardResetting = true;
+
     this.lastHardResetAtMs = Date.now();
     this.underConnectedSinceMs = null;
+    this.bootstrapGraceUntilMs = Date.now() + Math.max(0, this.config.bootstrapGraceMs);
+    this.everReachedMinPeers = false;
+
+    // Clear discovery state so a reset actually re-derives the roster.
+    this.discoveredPeers.clear();
+    this.discoveredPeerLastSeenAtMs.clear();
+
+    this.emit('mesh:reset', { reason });
 
     for (const t of this.connectionTimers.values()) {
       clearTimeout(t);
@@ -352,6 +520,11 @@ export class PartialMesh {
     } catch {
       // ignore
     }
+
+    // Allow close/error cascades to settle before enabling another reset.
+    setTimeout(() => {
+      this.isHardResetting = false;
+    }, 0);
   }
 
   private async handleOffer(peerId: string, offer: RTCSessionDescriptionInit): Promise<void> {
@@ -359,15 +532,85 @@ export class PartialMesh {
     const normalizedPeerId = this.normalizePeerId(peerId);
     if (!normalizedPeerId || normalizedPeerId === selfId) return;
 
+    // Deterministic role selection to avoid offer glare.
+    // Normally only the preferred initiator (selfId < peerId) should generate offers,
+    // but on a constrained/saturated mesh we must still accept inbound offers to
+    // avoid deadlocks (e.g. preferred initiator can't dial due to maxPeers pressure).
+    const wePreferInitiator = this.prefersInitiatorWith(normalizedPeerId);
+
+    const connectedCount = this.getConnectedPeers().length;
+    const underConnected = connectedCount < this.config.minPeers;
+    const cannotInitiateNow =
+      this.isCoolingDown(normalizedPeerId) ||
+      this.peers.size >= this.config.maxPeers ||
+      this.connecting.size > 0 ||
+      underConnected;
+
     let peerConnection = this.peers.get(normalizedPeerId);
     if (peerConnection?.initiator) {
-      try {
-        peerConnection.peer.destroy();
-      } catch {
-        // ignore
+      // Offer glare resolution:
+      // - If we are the preferred initiator for this pair, keep our outbound attempt.
+      // - Otherwise, yield to the inbound offer and become the responder.
+      if (!peerConnection.connected) {
+        if (wePreferInitiator) {
+          this.log('Ignoring inbound offer during glare (we are initiator)', { peerId: normalizedPeerId });
+          return;
+        }
+        try {
+          peerConnection.peer.destroy();
+        } catch {
+          // ignore
+        }
+        this.removePeer(normalizedPeerId, false);
+        peerConnection = undefined;
+      } else {
+        // Already connected: ignore unexpected offers.
+        this.log('Ignoring offer on already-connected peer', { peerId: normalizedPeerId });
+        return;
       }
-      this.removePeer(normalizedPeerId, false);
-      peerConnection = undefined;
+    }
+
+    // If we prefer initiator for this pair, only accept the inbound offer when we
+    // can't reasonably initiate right now. Otherwise ignore it and let our outbound
+    // dial win (or start one if missing).
+    if (wePreferInitiator) {
+      if (!peerConnection && !cannotInitiateNow) {
+        if (!this.connecting.has(normalizedPeerId)) {
+          this.connectToPeer(normalizedPeerId);
+        }
+        this.log('Ignoring unexpected offer (we are initiator)', { peerId: normalizedPeerId });
+        return;
+      }
+    }
+
+    // Ensure we have capacity to accept an inbound offer.
+    // If we're saturated, evict a stale pending dial first; otherwise (if safe)
+    // swap out a connected peer with slack above minPeers.
+    if (!peerConnection && this.peers.size >= this.config.maxPeers) {
+      const now = Date.now();
+      const evictAfterMs = 8_000;
+      const pending = Array.from(this.peers.values())
+        .filter((pc) => !pc.connected)
+        .filter((pc) => (now - (pc.createdAtMs || 0)) >= evictAfterMs);
+      pending.sort((a, b) => a.createdAtMs - b.createdAtMs);
+      const stale = pending[0];
+      if (stale) {
+        this.removePeer(stale.id, false, false);
+      } else {
+        const connected = this.getConnectedPeers();
+        if (connected.length > this.config.minPeers) {
+          const sorted = this.sortByXorDistance(connected);
+          const dropId = sorted[sorted.length - 1];
+          if (dropId) {
+            this.disconnectFromPeer(dropId);
+          }
+        }
+      }
+
+      if (this.peers.size >= this.config.maxPeers && !this.peers.has(normalizedPeerId)) {
+        this.log('Dropping inbound offer (no capacity)', { peerId: normalizedPeerId, maxPeers: this.config.maxPeers });
+        return;
+      }
     }
 
     if (!peerConnection) {
@@ -388,6 +631,10 @@ export class PartialMesh {
 
     const peerConnection = this.peers.get(normalizedPeerId);
     if (!peerConnection) return;
+    if (!peerConnection.initiator) {
+      // Only initiators should receive answers; ignore to avoid corrupting state.
+      return;
+    }
 
     try {
       peerConnection.peer.signal(answer);
@@ -426,6 +673,7 @@ export class PartialMesh {
       peer,
       connected: false,
       initiator,
+      createdAtMs: Date.now(),
     };
 
     const existingTimer = this.connectionTimers.get(peerId);
@@ -474,6 +722,7 @@ export class PartialMesh {
         this.maintainPeerConnections();
       }
       if (this.getConnectedPeers().length >= this.config.minPeers) {
+        this.everReachedMinPeers = true;
         this.emit('mesh:ready');
       }
     });
@@ -514,30 +763,152 @@ export class PartialMesh {
   }
 
   private maintainPeerConnections(): void {
+    // Note: peers in `connecting` are also present in `peers`, so do NOT
+    // double-count them. Our invariant is about *connected* peers.
     const currentPeerCount = this.peers.size;
-    const connectingCount = this.connecting.size;
-    const totalInProgress = currentPeerCount + connectingCount;
+    const connectedCount = this.getConnectedPeers().length;
+    const capacity = Math.max(0, this.config.maxPeers - currentPeerCount);
 
-    // Connect to ALL available peers when at or below minPeers
-    if (totalInProgress <= this.config.minPeers) {
+    const now = Date.now();
+
+    // If we're at maxPeers but have fewer than maxPeers *connected*, one (or more)
+    // slots are being consumed by stalled, never-connected dials. Under maxPeers=3
+    // this can permanently strand late joiners. Evict stale pending dials to free slots.
+    if (currentPeerCount >= this.config.maxPeers && connectedCount < this.config.maxPeers) {
+      const evictAfterMs = 8_000;
+      const pending = Array.from(this.peers.values())
+        .filter((pc) => !pc.connected)
+        .filter((pc) => (now - (pc.createdAtMs || 0)) >= evictAfterMs);
+      pending.sort((a, b) => a.createdAtMs - b.createdAtMs);
+      const slotsToFree = Math.max(1, currentPeerCount - (this.config.maxPeers - 1));
+      const toEvict = pending.slice(0, slotsToFree);
+      for (const pc of toEvict) {
+        this.removePeer(pc.id, false, false);
+      }
+    }
+
+    // If we're under-connected, connect to enough peers to reach minPeers.
+    // Never connect to ALL discovered peers; that can accidentally create a full mesh
+    // and defeat the purpose of a *partial* mesh.
+    if (connectedCount < this.config.minPeers) {
+      // Under-connected: dial sequentially (one at a time). This significantly
+      // reduces glare/offer storms under lossy public signaling while still
+      // ensuring progress.
+      if (this.connecting.size > 0) return;
+
       const available = Array.from(this.discoveredPeers).filter(
         (peerId) => !this.peers.has(peerId) && !this.connecting.has(peerId) && !this.isCoolingDown(peerId),
       );
+      const needed = Math.max(0, this.config.minPeers - connectedCount);
+
+      // If we're under-connected but at (or over) maxPeers due to stalled
+      // in-flight dials, evict the oldest non-connected peers to free slots.
+      // Otherwise we can get stuck below minPeers until the timeout fires.
+      const slotsMissing = Math.max(0, needed - capacity);
+      if (slotsMissing > 0) {
+        const now = Date.now();
+        const evictAfterMs = 8_000;
+        const pending = Array.from(this.peers.values())
+          .filter((pc) => !pc.connected)
+          .filter((pc) => (now - (pc.createdAtMs || 0)) >= evictAfterMs);
+        pending.sort((a, b) => a.createdAtMs - b.createdAtMs);
+        const toEvict = pending.slice(0, slotsMissing);
+        for (const pc of toEvict) {
+          this.removePeer(pc.id, false, false);
+        }
+      }
+
       if (available.length === 0) return;
 
-      // Connect to ALL available peers
-      for (const peerId of available) {
+      const refreshedCapacity = Math.max(0, this.config.maxPeers - this.peers.size);
+      const toConnect = Math.min(1, needed, refreshedCapacity, available.length);
+      if (toConnect <= 0) return;
+
+      // Choose closest peers by XOR distance (Kademlia-style) for faster, more stable convergence.
+      const chosen = this.sortByXorDistance(available).slice(0, toConnect);
+      for (const peerId of chosen) {
         this.connectToPeer(peerId);
       }
       return;
     }
 
+    // If we have spare candidates, rotate connections to improve mixing.
+    const available = Array.from(this.discoveredPeers).filter(
+      (peerId) => !this.peers.has(peerId) && !this.connecting.has(peerId) && !this.isCoolingDown(peerId),
+    );
+
+    // If we're healthy (>= minPeers) but not saturated (< maxPeers), proactively
+    // add a connection occasionally. This reduces the chance that small cliques
+    // form under maxPeers=3 and leave late-joining peers stranded at 0.
+    if (available.length > 0 && connectedCount >= this.config.minPeers && connectedCount < this.config.maxPeers) {
+      const now = Date.now();
+      const growIntervalMs = 2_500;
+      if (now - this.lastGrowAtMs >= growIntervalMs) {
+        this.lastGrowAtMs = now;
+        const pickId = this.sortByXorDistance(available)[0];
+        if (pickId) {
+          this.connectToPeer(pickId);
+          return;
+        }
+      }
+    }
+
+    if (available.length > 0 && connectedCount >= this.config.minPeers) {
+      const now = Date.now();
+      const shuffleIntervalMs = available.length >= 3 ? 3_000 : 6_000;
+      if (now - this.lastShuffleAtMs >= shuffleIntervalMs) {
+        const connectedIds = this.getConnectedPeers();
+        if (connectedIds.length > 0) {
+          const dropIdx = Math.floor(Math.random() * connectedIds.length);
+          const dropId = connectedIds[dropIdx];
+          const pickId = this.sortByXorDistance(available)[0];
+
+          this.lastShuffleAtMs = now;
+
+          // Never disconnect below minPeers.
+          // If we have slack (connected > minPeers), we can safely drop one.
+          // If we're exactly at minPeers, only add (up to maxPeers); dropping would
+          // temporarily violate the invariant.
+          if (connectedCount > this.config.minPeers) {
+            // If saturated at maxPeers, swap by dropping then connecting.
+            if (currentPeerCount >= this.config.maxPeers) {
+              this.disconnectFromPeer(dropId);
+              this.connectToPeer(pickId);
+            } else {
+              // Otherwise, connect then drop (still stays >= minPeers).
+              this.connectToPeer(pickId);
+              this.disconnectFromPeer(dropId);
+            }
+          } else {
+            // At minPeers: only grow if allowed.
+            if (currentPeerCount < this.config.maxPeers) {
+              this.connectToPeer(pickId);
+            }
+          }
+        }
+      }
+    }
+
     // Otherwise, enforce maxPeers cap
     if (currentPeerCount > this.config.maxPeers) {
-      const toDrop = currentPeerCount - this.config.maxPeers;
-      const peerIds = Array.from(this.peers.keys());
-      for (let i = 0; i < toDrop; i++) {
-        this.disconnectFromPeer(peerIds[i]);
+      // Never drop below minPeers while enforcing maxPeers.
+      const target = Math.max(this.config.maxPeers, this.config.minPeers);
+      const toDrop = Math.max(0, currentPeerCount - target);
+      const pending = Array.from(this.peers.values()).filter((pc) => !pc.connected);
+      pending.sort((a, b) => a.createdAtMs - b.createdAtMs);
+      const connected = Array.from(this.peers.values()).filter((pc) => pc.connected);
+      connected.sort((a, b) => a.createdAtMs - b.createdAtMs);
+
+      let remaining = toDrop;
+      for (const pc of pending) {
+        if (remaining <= 0) break;
+        this.removePeer(pc.id, false, false);
+        remaining--;
+      }
+      for (const pc of connected) {
+        if (remaining <= 0) break;
+        this.disconnectFromPeer(pc.id);
+        remaining--;
       }
     }
   }
@@ -555,7 +926,19 @@ export class PartialMesh {
       console.warn('Max peers reached, cannot connect to more peers');
       return;
     }
-    const initiator = selfId ? selfId < normalizedPeerId : true;
+
+    // Deterministic initiator selection: only one side dials to avoid glare.
+    // However, when we're under-connected we must be able to make progress even
+    // when we're the responder; otherwise we can remain at d0 long enough for
+    // higher-level protocols/tests to target an unreachable peer.
+    const connectedCount = this.getConnectedPeers().length;
+    const underConnected = connectedCount < this.config.minPeers;
+    const initiator = underConnected ? true : this.prefersInitiatorWith(normalizedPeerId);
+    if (!initiator) {
+      // We are the responder for this pair; wait for their offer.
+      return;
+    }
+
     this.connecting.add(normalizedPeerId);
     await this.createPeerConnection(normalizedPeerId, initiator);
   }
@@ -563,10 +946,18 @@ export class PartialMesh {
   public disconnectFromPeer(peerId: string): void {
     const normalizedPeerId = this.normalizePeerId(peerId);
     if (!normalizedPeerId) return;
+
+    // Never voluntarily drop below minPeers.
+    // Remote disconnects can still happen; maintenance will heal those.
+    const connected = this.getConnectedPeers().length;
+    if (connected <= this.config.minPeers) {
+      this.log('Refusing to disconnect below minPeers', { peerId: normalizedPeerId, connected, minPeers: this.config.minPeers });
+      return;
+    }
     this.removePeer(normalizedPeerId, false);
   }
 
-  private removePeer(peerId: string, forgetDiscovered: boolean = false): void {
+  private removePeer(peerId: string, forgetDiscovered: boolean = false, triggerMaintain: boolean = true): void {
     const peerConnection = this.peers.get(peerId);
     if (peerConnection) {
       const t = this.connectionTimers.get(peerId);
@@ -583,7 +974,12 @@ export class PartialMesh {
         this.discoveredPeers.delete(peerId);
       }
       this.emit('peer:disconnected', peerId);
-      if (this.config.autoConnect) {
+
+      // If configured, enforce the invariant by restarting the mesh immediately
+      // when we dip below minPeers.
+      this.maybeHardResetBelowMinPeers('disconnect');
+
+      if (triggerMaintain && this.config.autoConnect && !this.isHardResetting) {
         this.maintainPeerConnections();
       }
     }
@@ -633,6 +1029,30 @@ export class PartialMesh {
     }
 
     return result;
+  }
+
+  /**
+   * Add peer IDs as discovered candidates.
+   *
+   * This helps in environments where public signaling rosters are partial
+   * or event delivery is unreliable; higher-level protocols (like gossip)
+   * can still surface peer IDs that we can attempt to connect to.
+   */
+  public learnPeers(peerIds: string[]): void {
+    const selfId = this.normalizePeerId(this.clientId);
+    const now = Date.now();
+    for (const raw of peerIds ?? []) {
+      const peerId = this.normalizePeerId(raw);
+      if (!peerId) continue;
+      if (selfId && peerId === selfId) continue;
+      this.discoveredPeers.add(peerId);
+      this.discoveredPeerLastSeenAtMs.set(peerId, now);
+      this.maybeEagerConnectToDiscoveredPeer(peerId, 'learnPeers');
+    }
+
+    if (this.config.autoConnect) {
+      this.maintainPeerConnections();
+    }
   }
 
   public getPeerCount(): number {
@@ -694,6 +1114,10 @@ export class PartialMesh {
     this.underConnectedSinceMs = null;
     this.lastHardResetAtMs = 0;
     this.lastSessionRefreshAtMs = 0;
+    this.bootstrapGraceUntilMs = 0;
+    this.everReachedMinPeers = false;
+    this.isHardResetting = false;
+    this.lastBelowMinResetAtMs = 0;
 
     if (this.uniwrtcClient) {
       this.uniwrtcClient.disconnect();

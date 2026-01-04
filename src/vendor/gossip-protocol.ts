@@ -1,5 +1,7 @@
 export type GossipProtocolOptions = {
   maxHops?: number;
+  directRetryIntervalMs?: number;
+  directRetryCount?: number;
 };
 
 export type GossipMessage = {
@@ -50,12 +52,17 @@ export class GossipProtocol {
   private mesh: MeshLike;
   private messageLog: Map<string, { timestamp: number; sender: string | null; hops: number }> = new Map();
   private maxHops: number;
+  private directRetryIntervalMs: number;
+  private directRetryCount: number;
   private callbacks: Partial<Record<keyof GossipEvents, Set<Function>>> = {};
   private peers: Map<string, { connected: boolean; timestamp: number }> = new Map();
+  private retryTimers: Set<ReturnType<typeof setTimeout>> = new Set();
 
   constructor(mesh: MeshLike, options: GossipProtocolOptions = {}) {
     this.mesh = mesh;
     this.maxHops = options.maxHops ?? 5;
+    this.directRetryIntervalMs = options.directRetryIntervalMs ?? 1_500;
+    this.directRetryCount = options.directRetryCount ?? 10;
     this.setupMeshListeners();
   }
 
@@ -138,8 +145,30 @@ export class GossipProtocol {
     });
 
     this.propagate(message);
+    this.scheduleDirectRetries(message);
     this.emit('messageReceived', { message, local: true });
     return message.id;
+  }
+
+  private scheduleDirectRetries(message: GossipMessage): void {
+    if (!this.directRetryCount || this.directRetryCount <= 0) return;
+    if (!this.directRetryIntervalMs || this.directRetryIntervalMs <= 0) return;
+
+    let remaining = this.directRetryCount;
+    const tick = () => {
+      remaining -= 1;
+      if (remaining <= 0) return;
+      try {
+        this.propagate(message);
+      } catch {
+        // best-effort
+      }
+      const next = setTimeout(tick, this.directRetryIntervalMs);
+      this.retryTimers.add(next);
+    };
+
+    const first = setTimeout(tick, this.directRetryIntervalMs);
+    this.retryTimers.add(first);
   }
 
   propagate(message: GossipMessage): void {
@@ -214,6 +243,8 @@ export class GossipProtocol {
   }
 
   destroy(): void {
+    for (const t of this.retryTimers) clearTimeout(t);
+    this.retryTimers.clear();
     this.messageLog.clear();
     this.peers.clear();
     this.callbacks = {};
