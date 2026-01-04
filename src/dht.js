@@ -402,6 +402,7 @@ class DHT extends EventEmitter {
         FIND_NODE: this._handleFindNode.bind(this),
         FIND_VALUE: this._handleFindValue.bind(this),
         STORE: this._handleStore.bind(this),
+        DELETE: this._handleDelete.bind(this),
         SIGNAL: this._handleSignal.bind(this),
       };
 
@@ -1793,6 +1794,53 @@ class DHT extends EventEmitter {
       key: keyStr,
     });
   }
+
+  /**
+   * Handle a DELETE message from a peer
+   * @param {Object} message - Message object
+   * @param {string} peerId - Sender peer ID
+   * @private
+   */
+  async _handleDelete(message, peerId) {
+    const keyHashHex = message.key;
+    
+    this._logDebug(`Received DELETE message from ${peerId.substring(0, 8)}... for key: ${keyHashHex.substring(0, 8)}`);
+
+    // Add sender to routing table
+    this._addNode({
+      id: hexToBuffer(message.sender),
+      host: null,
+      port: null,
+    });
+
+    const keyBuffer = hexToBuffer(keyHashHex);
+    const peer = this.peers.get(peerId);
+
+    if (!peer) {
+      this._logDebug(`Received DELETE from unknown peer: ${peerId}`);
+      return;
+    }
+
+    // Delete from local storage
+    this.storage.delete(keyHashHex);
+    this.storageTimestamps.delete(keyHashHex);
+    this.keyMapping.delete(keyHashHex);
+
+    // Persist deletion
+    await this._persistRecord(keyHashHex);
+
+    this._logDebug(`Deleted key: ${keyHashHex.substring(0, 8)} per request from ${peerId.substring(0, 8)}...`);
+
+    // Send confirmation if peer is connected
+    if (peer && peer.connected) {
+      peer.send({
+        type: "DELETE_RESPONSE",
+        sender: this.nodeIdHex,
+        success: true,
+        key: keyHashHex,
+      });
+    }
+  }
   
   /**
    * Handle a SIGNAL message
@@ -2513,11 +2561,173 @@ class DHT extends EventEmitter {
     this._logDebug(`get - No value found for key: ${key} in DHT`);
     return null;
   }
-  
+
   /**
-   * Replicate data to K closest nodes for each key
-   * @private
+   * Delete a value from the DHT
+   * @param {string} key - Key to delete
+   * @return {Promise<boolean>} True if deletion was successful
    */
+  async delete(key) {
+    // Hash the key unless it's already a hash
+    const keyHashHex = /^[a-fA-F0-9]{40}$/.test(key)
+      ? key
+      : bufferToHex(await sha1(key));
+
+    this._logDebug(`delete - Attempting to delete key: ${key}, hash: ${keyHashHex}`);
+
+    // Remove from local storage
+    const existed = this.storage.has(keyHashHex);
+    this.storage.delete(keyHashHex);
+    this.storageTimestamps.delete(keyHashHex);
+    this.keyMapping.delete(keyHashHex);
+
+    // Persist deletion
+    await this._persistRecord(keyHashHex);
+
+    // Notify K closest nodes to delete this key
+    const keyBuffer = hexToBuffer(keyHashHex);
+    let closestNodes = [];
+
+    for (let i = 0; i < this.BUCKET_COUNT; i++) {
+      closestNodes = closestNodes.concat(this.buckets[i].nodes);
+    }
+
+    closestNodes = closestNodes
+      .filter((n) => {
+        const nIdHex = typeof n.id === "string" ? n.id : bufferToHex(n.id);
+        return nIdHex !== this.nodeIdHex && this.peers.has(nIdHex);
+      })
+      .sort((a, b) => {
+        const distA = distance(a.id, keyBuffer);
+        const distB = distance(b.id, keyBuffer);
+        return compareBuffers(distA, distB);
+      })
+      .slice(0, this.K);
+
+    this._logDebug(`delete - Notifying ${closestNodes.length} nodes to delete key: ${key}`);
+
+    // Send DELETE message to all K closest nodes
+    closestNodes.forEach((node) => {
+      const nodeIdHex = typeof node.id === "string" ? node.id : bufferToHex(node.id);
+      const peer = this.peers.get(nodeIdHex);
+
+      if (peer && peer.connected) {
+        peer.send({
+          type: "DELETE",
+          sender: this.nodeIdHex,
+          key: keyHashHex,
+        });
+      }
+    });
+
+    if (existed) {
+      this._logDebug(`delete - Successfully deleted key: ${key}`);
+    } else {
+      this._logDebug(`delete - Key not found in storage: ${key}`);
+    }
+
+    return existed;
+  }
+
+  /**
+   * Update a value in the DHT (shorthand for put with existing TTL)
+   * @param {string} key - Key to update
+   * @param {any} value - New value
+   * @return {Promise<boolean>} True if update was successful
+   */
+  async update(key, value) {
+    this._logDebug(`update - Updating key: ${key}`);
+
+    // Get existing TTL if available, otherwise use default
+    const keyHashHex = /^[a-fA-F0-9]{40}$/.test(key)
+      ? key
+      : bufferToHex(await sha1(key));
+
+    const existingRecord = this.storage.get(keyHashHex);
+    const existingTtl = existingRecord?.ttl || null;
+
+    // Use put() which handles replication
+    const result = await this.put(key, value);
+
+    if (result) {
+      this._logDebug(`update - Successfully updated key: ${key}`);
+    } else {
+      this._logDebug(`update - Failed to update key: ${key}`);
+    }
+
+    return result;
+  }
+
+  /**
+   * Check if a key exists in the DHT
+   * @param {string} key - Key to check
+   * @return {Promise<boolean>} True if key exists
+   */
+  async exists(key) {
+    const keyHashHex = /^[a-fA-F0-9]{40}$/.test(key)
+      ? key
+      : bufferToHex(await sha1(key));
+
+    // Check local storage first
+    if (this.storage.has(keyHashHex)) {
+      return this.storage.get(keyHashHex).value !== undefined;
+    }
+
+    // Try to get from DHT
+    const value = await this.get(key);
+    return value !== null && value !== undefined;
+  }
+
+  /**
+   * Get all keys currently stored
+   * @return {Promise<string[]>} Array of original key names
+   */
+  async keys() {
+    const allKeys = [];
+    for (const [keyHashHex, storedData] of this.storage.entries()) {
+      if (storedData.value !== undefined) {
+        const originalKey = this.keyMapping.get(keyHashHex) || keyHashHex;
+        allKeys.push(originalKey);
+      }
+    }
+    return allKeys;
+  }
+
+  /**
+   * Get all key-value pairs currently stored
+   * @return {Promise<Object>} Object with all key-value pairs
+   */
+  async entries() {
+    const allEntries = {};
+    for (const [keyHashHex, storedData] of this.storage.entries()) {
+      if (storedData.value !== undefined) {
+        const originalKey = this.keyMapping.get(keyHashHex) || keyHashHex;
+        allEntries[originalKey] = storedData.value;
+      }
+    }
+    return allEntries;
+  }
+
+  /**
+   * Clear all data from local storage (doesn't affect network)
+   * @return {Promise<void>}
+   */
+  async clear() {
+    this._logDebug('clear - Clearing all local storage');
+    const keysToDelete = Array.from(this.storage.keys());
+    
+    this.storage.clear();
+    this.storageTimestamps.clear();
+    this.keyMapping.clear();
+
+    // Clear from IndexedDB
+    if (isIndexedDbAvailable()) {
+      for (const keyHashHex of keysToDelete) {
+        await idbDelete(IDB_STORES.DHT, keyHashHex);
+      }
+    }
+  }
+  
   _replicateData() {
     this._logDebug("Starting data replication..."); // Use _logDebug
     this.storage.forEach(async (storedData, keyHashHex) => {

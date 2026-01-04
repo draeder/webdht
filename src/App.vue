@@ -61,7 +61,9 @@
         </div>
         <div class="settings-group" style="display:flex; gap:0.5rem;">
           <button @click="putStorage" class="btn">Put</button>
+          <button @click="updateStorage" class="btn">Update</button>
           <button @click="getStorage" class="btn">Get</button>
+          <button @click="deleteStorage" class="btn" style="background-color: #d32f2f;">Delete</button>
           <button @click="toggleStorageSubscribe" class="btn">
             {{ isSubscribedToCurrent ? 'Unsubscribe' : 'Subscribe' }}
           </button>
@@ -941,6 +943,108 @@ export default {
       }
     },
 
+    updateStorage() {
+      if (!this.gossip) return
+      const space = this.storageSpace
+      const key = String(this.storageKey || '').trim()
+      const value = this.storageValue
+      if (!key) {
+        this.storageStatus = 'Key is required'
+        return
+      }
+      if (value === undefined || value === null || String(value).length === 0) {
+        this.storageStatus = 'Value is required'
+        return
+      }
+
+      const canonical = this.canonicalStorageKey(space, key)
+      const store = this.storageLocal?.[space]
+      if (!store) {
+        this.storageStatus = 'Unknown space'
+        return
+      }
+
+      if (!store.has(canonical)) {
+        this.storageStatus = `Key does not exist in ${space}`
+        return
+      }
+
+      // Update local storage
+      store.set(canonical, value)
+      this.storageValueOriginByCanonicalKey.set(canonical, 'local')
+      this.persistUiStorageValue(space, canonical, value)
+      this.storageStatus = `Updated locally in ${space}`
+      this.storageResult = String(value)
+      this.applyStorageSubscriptionUpdate(space, canonical, value, 'local')
+
+      if (space === 'public' || space === 'frozen') {
+        const metadata = {
+          kind: 'storage',
+          op: 'update',
+          space,
+          key: canonical,
+          owner: this.clientId,
+        }
+
+        try {
+          this.gossip.broadcast(value, metadata)
+          this.storageStatus = `Updated in ${space} (broadcast)`
+          this.applyStorageSubscriptionUpdate(space, canonical, value, 'broadcast')
+        } catch (err) {
+          console.error('Storage update broadcast failed', err)
+          this.storageStatus = `Updated locally in ${space}, broadcast failed`
+        }
+      }
+    },
+
+    deleteStorage() {
+      if (!this.gossip) return
+      const space = this.storageSpace
+      const key = String(this.storageKey || '').trim()
+      if (!key) {
+        this.storageStatus = 'Key is required'
+        return
+      }
+
+      const canonical = this.canonicalStorageKey(space, key)
+      const store = this.storageLocal?.[space]
+      if (!store) {
+        this.storageStatus = 'Unknown space'
+        return
+      }
+
+      if (!store.has(canonical)) {
+        this.storageStatus = `Key does not exist in ${space}`
+        return
+      }
+
+      // Delete from local storage
+      store.delete(canonical)
+      this.storageValueOriginByCanonicalKey.delete(canonical)
+      this.storageStatus = `Deleted from ${space}`
+      this.storageResult = ''
+      this.storageValue = ''
+      this.applyStorageSubscriptionUpdate(space, canonical, undefined, 'local')
+
+      if (space === 'public' || space === 'frozen') {
+        const metadata = {
+          kind: 'storage',
+          op: 'delete',
+          space,
+          key: canonical,
+          owner: this.clientId,
+        }
+
+        try {
+          this.gossip.broadcast(null, metadata)
+          this.storageStatus = `Deleted from ${space} (broadcast)`
+        } catch (err) {
+          console.error('Storage delete broadcast failed', err)
+          this.storageStatus = `Deleted locally in ${space}, broadcast failed`
+        }
+      }
+    },
+
     handleStorageMessage(message, local) {
       const meta = message?.metadata || {}
       const op = meta?.op
@@ -964,6 +1068,29 @@ export default {
         }
         this.persistUiStorageValue(space, key, incomingValue)
         this.applyStorageSubscriptionUpdate(space, key, incomingValue, local ? 'local' : 'network')
+        return
+      }
+
+      if (op === 'update') {
+        // Accept public/frozen updates from network.
+        if (!(space === 'public' || space === 'frozen')) return
+        if (!store.has(key)) return // Can't update non-existent key
+        const incomingValue = String(message.data)
+        store.set(key, incomingValue)
+        if (!local) {
+          this.storageValueOriginByCanonicalKey.set(key, 'network')
+        }
+        this.persistUiStorageValue(space, key, incomingValue)
+        this.applyStorageSubscriptionUpdate(space, key, incomingValue, local ? 'local' : 'network')
+        return
+      }
+
+      if (op === 'delete') {
+        // Accept public/frozen deletes from network.
+        if (!(space === 'public' || space === 'frozen')) return
+        store.delete(key)
+        this.storageValueOriginByCanonicalKey.delete(key)
+        this.applyStorageSubscriptionUpdate(space, key, undefined, local ? 'local' : 'network')
         return
       }
 
