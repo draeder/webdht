@@ -17,6 +17,7 @@ import {
   Buffer,
 } from "./utils.js";
 import Logger from './logger.js';
+import { IDB_STORES, idbDelete, idbGetAll, idbSet, isIndexedDbAvailable } from './idb.js';
 
 // Default Kademlia constants
 const DEFAULT_K = 20; // Default size of k-buckets
@@ -268,6 +269,70 @@ class DHT extends EventEmitter {
     this._initialize(options);
   }
 
+  async _loadPersistedStorage() {
+    if (!this._persistToIndexedDb || !isIndexedDbAvailable()) return;
+    try {
+      const records = await idbGetAll(IDB_STORES.DHT);
+      if (!Array.isArray(records) || records.length === 0) return;
+
+      for (const rec of records) {
+        if (!rec || typeof rec !== 'object') continue;
+        const keyHashHex = String(rec.key || '').trim();
+        if (!/^[a-fA-F0-9]{40}$/.test(keyHashHex)) continue;
+
+        const timestamp = typeof rec.timestamp === 'number' ? rec.timestamp : Date.now();
+        const meta = rec.meta && typeof rec.meta === 'object' ? rec.meta : null;
+
+        this.storage.set(keyHashHex, {
+          value: rec.value,
+          timestamp,
+          replicatedTo: new Set(),
+          ...(meta ? { meta } : {}),
+        });
+        this.storageTimestamps.set(keyHashHex, timestamp);
+        if (typeof rec.originalKey === 'string' && rec.originalKey) {
+          this.keyMapping.set(keyHashHex, rec.originalKey);
+        }
+      }
+
+      // Enforce storage limit and keep IndexedDB in sync.
+      if (this.storage.size > this.MAX_STORE_SIZE) {
+        const entries = Array.from(this.storageTimestamps.entries()).sort((a, b) => a[1] - b[1]);
+        const overflow = entries.length - this.MAX_STORE_SIZE;
+        for (let i = 0; i < overflow; i++) {
+          const [oldKey] = entries[i];
+          this.storage.delete(oldKey);
+          this.storageTimestamps.delete(oldKey);
+          this.keyMapping.delete(oldKey);
+          await idbDelete(IDB_STORES.DHT, oldKey);
+        }
+      }
+    } catch (err) {
+      this._logDebug('IndexedDB load failed:', err);
+    }
+  }
+
+  async _persistRecord(keyHashHex) {
+    if (!this._persistToIndexedDb || !isIndexedDbAvailable()) return;
+    try {
+      const stored = this.storage.get(keyHashHex);
+      if (!stored) {
+        await idbDelete(IDB_STORES.DHT, keyHashHex);
+        return;
+      }
+      const record = {
+        key: keyHashHex,
+        value: stored.value,
+        timestamp: stored.timestamp,
+        meta: stored.meta || null,
+        originalKey: this.keyMapping.get(keyHashHex) || null,
+      };
+      await idbSet(IDB_STORES.DHT, keyHashHex, record);
+    } catch (err) {
+      this._logDebug('IndexedDB persist failed:', err);
+    }
+  }
+
   /**
    * Initialize the DHT node asynchronously
    * @private
@@ -314,6 +379,10 @@ class DHT extends EventEmitter {
       this.storage = new Map();
       this.storageTimestamps = new Map();
       this.keyMapping = new Map(); // Map from hash to original key name
+
+      // Persist stored values across reloads (browser only)
+      this._persistToIndexedDb = options.persistToIndexedDb !== false;
+      await this._loadPersistedStorage();
 
       // Storage space support (namespacing + basic policy enforcement)
       this.STORAGE_SPACES = new Set(["public", "user", "private", "frozen"]);
@@ -1694,6 +1763,7 @@ class DHT extends EventEmitter {
     });
     this.storageTimestamps.set(keyHashHex, timestamp);
     this.keyMapping.set(keyHashHex, keyStr); // Store original key name
+    await this._persistRecord(keyHashHex);
 
     // Enforce storage size limit
     if (this.storage.size > this.MAX_STORE_SIZE) {
@@ -1711,6 +1781,7 @@ class DHT extends EventEmitter {
         this.storage.delete(oldestKey);
         this.storageTimestamps.delete(oldestKey);
         this.keyMapping.delete(oldestKey); // Clean up key mapping
+        await this._persistRecord(oldestKey);
       }
     }
 
@@ -2225,6 +2296,7 @@ class DHT extends EventEmitter {
         this.storage.delete(oldestKey);
         this.storageTimestamps.delete(oldestKey);
         this.keyMapping.delete(oldestKey); // Clean up key mapping
+        await this._persistRecord(oldestKey);
       }
     }
 
@@ -2242,6 +2314,7 @@ class DHT extends EventEmitter {
     });
     this.storageTimestamps.set(keyHashHex, timestamp);
     this.keyMapping.set(keyHashHex, keyStr); // Store original key name
+    await this._persistRecord(keyHashHex);
 
     // Find K closest nodes to the key
     const nodes = await this.findNode(keyHashHex);
@@ -2345,6 +2418,7 @@ class DHT extends EventEmitter {
         this.storage.delete(keyHashHex);
         this.storageTimestamps.delete(keyHashHex);
         this.keyMapping.delete(keyHashHex); // Clean up key mapping
+        await this._persistRecord(keyHashHex);
       }
     }
 
@@ -2431,6 +2505,7 @@ class DHT extends EventEmitter {
         });
         this.storageTimestamps.set(keyHashHex, timestamp);
         this.keyMapping.set(keyHashHex, key); // Store original key name
+        await this._persistRecord(keyHashHex);
         return result;
       }
     }
@@ -2625,6 +2700,7 @@ class DHT extends EventEmitter {
         this.storage.delete(oldestKey);
         this.storageTimestamps.delete(oldestKey);
         this.keyMapping.delete(oldestKey);
+        await this._persistRecord(oldestKey);
       }
     }
 
@@ -2643,6 +2719,7 @@ class DHT extends EventEmitter {
     });
     this.storageTimestamps.set(keyHashHex, timestamp);
     this.keyMapping.set(keyHashHex, canonicalKey);
+    await this._persistRecord(keyHashHex);
 
     const nodes = await this.findNode(keyHashHex);
     if (nodes.length === 0) return true;

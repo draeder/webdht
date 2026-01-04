@@ -28,6 +28,14 @@
           <input v-model="signalingServer" type="text" placeholder="wss://signal.peer.ooo" class="input" />
         </div>
         <div class="settings-group">
+          <label>IndexedDB quota:</label>
+          <select v-model="idbQuotaLevel" class="select" @change="onQuotaChanged">
+            <option value="low">low</option>
+            <option value="normal">normal</option>
+            <option value="high">high</option>
+          </select>
+        </div>
+        <div class="settings-group">
           <button @click="reconnectSignaling" class="btn">Reconnect</button>
         </div>
       </section>
@@ -54,6 +62,12 @@
         <div class="settings-group" style="display:flex; gap:0.5rem;">
           <button @click="putStorage" class="btn">Put</button>
           <button @click="getStorage" class="btn">Get</button>
+          <button @click="toggleStorageSubscribe" class="btn">
+            {{ isSubscribedToCurrent ? 'Unsubscribe' : 'Subscribe' }}
+          </button>
+        </div>
+        <div v-if="storageSubscribedCanonicalKey" class="empty" style="margin-top:0.5rem;">
+          <p>Subscribed: {{ storageSubscribedCanonicalKey }}</p>
         </div>
         <div v-if="storageStatus" class="empty" style="margin-top:0.5rem;">
           <p>{{ storageStatus }}</p>
@@ -120,6 +134,7 @@
 import { PartialMesh } from './vendor/partialmesh.ts'
 import { GossipProtocol } from './vendor/gossip-protocol.ts'
 import { generateRandomPair } from 'unsea'
+import { IDB_STORES, getQuotaLevel, idbGetAll, idbSet, isIndexedDbAvailable, setQuotaLevel } from './idb.js'
 
 function buildIceServers() {
   const servers = [
@@ -145,7 +160,10 @@ export default {
       identity: null,
       publicKey: '',
       connectedPeers: [],
+      // Room roster candidates from signaling (can be stale on public servers).
       discoveredPeers: [],
+      // Peer graph gossiped by connected peers: peerId -> { peers: Set<string>, lastSeenAtMs: number }
+      peerGraph: new Map(),
       messages: [],
       selectedPeer: '',
       messageText: '',
@@ -154,6 +172,8 @@ export default {
       storageValue: '',
       storageStatus: '',
       storageResult: '',
+      storageSubscribedCanonicalKey: '',
+      storageSubscribedSpace: '',
       storageLocal: {
         public: new Map(),
         user: new Map(),
@@ -161,12 +181,14 @@ export default {
         frozen: new Map(),
       },
       pendingStorageGets: new Map(),
+      idbQuotaLevel: 'normal',
       signalingServer: 'wss://signal.peer.ooo/ws',
       signalingRoom: 'webdht-test',
       connected: false,
       signalingWs: null,
       clientId: null,
       peerSyncTimer: null,
+      peerGraphTimer: null,
     }
   },
   computed: {
@@ -177,17 +199,186 @@ export default {
         : this.publicKey
     },
     allPeers() {
-      const unique = new Set([...(this.connectedPeers || []), ...(this.discoveredPeers || [])]);
-      const selfId = this.clientId;
-      if (selfId) unique.delete(selfId);
-      return Array.from(unique);
-    }
+      const unique = new Set([...(this.connectedPeers || []), ...(this.indirectPeers || [])])
+      const selfId = this.clientId
+      if (selfId) unique.delete(selfId)
+      return Array.from(unique)
+    },
+
+    isSubscribedToCurrent() {
+      const key = String(this.storageKey || '').trim()
+      if (!key) return false
+      const canonical = this.canonicalStorageKey(this.storageSpace, key)
+      return Boolean(this.storageSubscribedCanonicalKey && canonical === this.storageSubscribedCanonicalKey)
+    },
+
+    indirectPeers() {
+      const selfId = this.clientId
+      if (!selfId) return []
+
+      const now = Date.now()
+      const ttlMs = 15_000
+      const maxHops = 3
+
+      // Build adjacency from recent graph entries.
+      const adjacency = new Map()
+      for (const [nodeId, entry] of this.peerGraph.entries()) {
+        if (!entry || typeof entry !== 'object') continue
+        if (typeof entry.lastSeenAtMs !== 'number') continue
+        if (now - entry.lastSeenAtMs > ttlMs) continue
+        adjacency.set(nodeId, entry.peers)
+      }
+
+      // Always include our direct connections.
+      adjacency.set(selfId, new Set(this.connectedPeers || []))
+
+      // BFS up to maxHops.
+      const visited = new Set([selfId])
+      let frontier = new Set([selfId])
+      for (let depth = 0; depth < maxHops; depth++) {
+        const next = new Set()
+        for (const nodeId of frontier) {
+          const neighbors = adjacency.get(nodeId)
+          if (!neighbors) continue
+          for (const raw of neighbors) {
+            const peerId = String(raw || '').trim()
+            if (!peerId) continue
+            if (visited.has(peerId)) continue
+            visited.add(peerId)
+            next.add(peerId)
+          }
+        }
+        frontier = next
+        if (frontier.size === 0) break
+      }
+
+      // Remove direct peers + self; remaining are indirect reachable peers.
+      for (const p of (this.connectedPeers || [])) visited.delete(p)
+      visited.delete(selfId)
+      return Array.from(visited)
+    },
   },
   mounted() {
     this.initIdentity()
+    this.idbQuotaLevel = getQuotaLevel()
+    this.loadPersistedUiStorage()
     this.setupMesh()
   },
   methods: {
+    applyStorageSubscriptionUpdate(space, canonicalKey, value, source) {
+      if (!this.storageSubscribedCanonicalKey) return
+      if (String(canonicalKey) !== String(this.storageSubscribedCanonicalKey)) return
+      if (String(space) !== String(this.storageSubscribedSpace)) return
+
+      this.storageValue = String(value)
+      this.storageResult = String(value)
+      this.storageStatus = `Subscription update (${source}) in ${space}`
+    },
+
+    async toggleStorageSubscribe() {
+      const space = this.storageSpace
+      const key = String(this.storageKey || '').trim()
+      if (!key) {
+        this.storageStatus = 'Key is required to subscribe'
+        return
+      }
+      const canonical = this.canonicalStorageKey(space, key)
+      if (!canonical) {
+        this.storageStatus = 'Invalid key'
+        return
+      }
+
+      if (this.storageSubscribedCanonicalKey === canonical && this.storageSubscribedSpace === space) {
+        this.storageSubscribedCanonicalKey = ''
+        this.storageSubscribedSpace = ''
+        this.storageStatus = 'Unsubscribed'
+        return
+      }
+
+      this.storageSubscribedCanonicalKey = canonical
+      this.storageSubscribedSpace = space
+      this.storageStatus = `Subscribed to ${canonical}`
+
+      // Event-based: ask the mesh for the current value without using Get/polling.
+      // - public/frozen: broadcast a subscription request and accept the first direct response.
+      // - user/private: local-only (no broadcast).
+      const store = this.storageLocal?.[space]
+      if (store && store.has(canonical)) {
+        const value = store.get(canonical)
+        this.applyStorageSubscriptionUpdate(space, canonical, value, 'local')
+        return
+      }
+
+      if (space === 'public' || space === 'frozen') {
+        const requestId = this.makeRequestId()
+        const p = new Promise((resolve) => {
+          const timeout = setTimeout(() => {
+            this.pendingStorageGets.delete(requestId)
+            resolve(null)
+          }, 5000)
+          this.pendingStorageGets.set(requestId, { resolve, timeout, space, key: canonical })
+        })
+
+        try {
+          this.gossip.broadcast('', {
+            kind: 'storage',
+            op: 'sub',
+            space,
+            key: canonical,
+            requester: this.clientId,
+            requestId,
+          })
+        } catch {
+          // ignore
+        }
+
+        const value = await p
+        if (value !== null && value !== undefined) {
+          store?.set(canonical, value)
+          this.persistUiStorageValue(space, canonical, value)
+          this.applyStorageSubscriptionUpdate(space, canonical, value, 'network')
+        }
+      }
+    },
+    async loadPersistedUiStorage() {
+      if (!isIndexedDbAvailable()) return
+      try {
+        const rows = await idbGetAll(IDB_STORES.UI)
+        if (!Array.isArray(rows) || rows.length === 0) return
+
+        for (const row of rows) {
+          if (!row || typeof row !== 'object') continue
+          const space = String(row.space || '')
+          const key = String(row.key || '')
+          if (!space || !key) continue
+          const store = this.storageLocal?.[space]
+          if (!store) continue
+          store.set(key, String(row.value ?? ''))
+        }
+      } catch (err) {
+        console.error('Failed to load persisted UI storage', err)
+      }
+    },
+
+    async persistUiStorageValue(space, canonicalKey, value) {
+      if (!isIndexedDbAvailable()) return
+      try {
+        const record = {
+          space: String(space),
+          key: String(canonicalKey),
+          value: String(value ?? ''),
+          timestamp: Date.now(),
+        }
+        await idbSet(IDB_STORES.UI, record.key, record)
+      } catch {
+        // best-effort
+      }
+    },
+
+    onQuotaChanged() {
+      // Best-effort: applies to future persistence/evictions.
+      this.idbQuotaLevel = setQuotaLevel(this.idbQuotaLevel)
+    },
     async initIdentity() {
       try {
         const identity = await generateRandomPair()
@@ -228,6 +419,22 @@ export default {
             // best-effort
           }
         }, 1500)
+
+        // Gossip our direct peer list so others can derive indirect peers accurately.
+        if (this.peerGraphTimer) clearInterval(this.peerGraphTimer)
+        this.peerGraphTimer = setInterval(() => {
+          try {
+            if (!this.gossip || !this.mesh || !this.clientId) return
+            this.gossip.broadcast('', {
+              kind: 'peerGraph',
+              nodeId: this.clientId,
+              peers: this.mesh.getConnectedPeers(),
+              ts: Date.now(),
+            })
+          } catch {
+            // best-effort
+          }
+        }, 2000)
       })
 
       this.mesh.on('signaling:disconnected', () => {
@@ -237,10 +444,16 @@ export default {
         this.nodeIdShort = ''
         this.connectedPeers = []
         this.discoveredPeers = []
+        this.peerGraph = new Map()
 
         if (this.peerSyncTimer) {
           clearInterval(this.peerSyncTimer)
           this.peerSyncTimer = null
+        }
+
+        if (this.peerGraphTimer) {
+          clearInterval(this.peerGraphTimer)
+          this.peerGraphTimer = null
         }
       })
 
@@ -248,6 +461,20 @@ export default {
         console.log('✅ Peer connected via mesh:', peerId)
         if (!this.connectedPeers.includes(peerId)) {
           this.connectedPeers.push(peerId)
+        }
+
+        // Push an update quickly when topology changes.
+        try {
+          if (this.gossip && this.mesh && this.clientId) {
+            this.gossip.broadcast('', {
+              kind: 'peerGraph',
+              nodeId: this.clientId,
+              peers: this.mesh.getConnectedPeers(),
+              ts: Date.now(),
+            })
+          }
+        } catch {
+          // ignore
         }
       })
 
@@ -261,6 +488,20 @@ export default {
       this.mesh.on('peer:disconnected', (peerId) => {
         console.log('❌ Peer disconnected:', peerId)
         this.connectedPeers = this.connectedPeers.filter(p => p !== peerId)
+
+        // Push an update quickly when topology changes.
+        try {
+          if (this.gossip && this.mesh && this.clientId) {
+            this.gossip.broadcast('', {
+              kind: 'peerGraph',
+              nodeId: this.clientId,
+              peers: this.mesh.getConnectedPeers(),
+              ts: Date.now(),
+            })
+          }
+        } catch {
+          // ignore
+        }
       })
 
       this.mesh.on('peer:error', (payload) => {
@@ -283,6 +524,11 @@ export default {
         // Handle storage control messages (do not show in chat UI)
         if (kind === 'storage') {
           this.handleStorageMessage(message, local)
+          return
+        }
+
+        if (kind === 'peerGraph') {
+          this.handlePeerGraphMessage(message)
           return
         }
 
@@ -343,6 +589,22 @@ export default {
       this.messageText = ''
     },
 
+    handlePeerGraphMessage(message) {
+      const meta = message?.metadata || {}
+      const nodeId = String(meta?.nodeId || '').trim()
+      const peers = Array.isArray(meta?.peers) ? meta.peers : null
+      if (!nodeId || !peers) return
+      if (this.clientId && nodeId === this.clientId) return
+
+      const normalized = new Set(
+        peers
+          .map((p) => String(p || '').trim())
+          .filter((p) => p && (!this.clientId || p !== this.clientId)),
+      )
+
+      this.peerGraph.set(nodeId, { peers: normalized, lastSeenAtMs: Date.now() })
+    },
+
     canonicalStorageKey(space, key) {
       const k = String(key || '').trim()
       const owner = this.clientId || 'unknown'
@@ -386,8 +648,10 @@ export default {
 
       // user/private are local-only (best-effort privacy without crypto)
       store.set(canonical, value)
+      this.persistUiStorageValue(space, canonical, value)
       this.storageStatus = `Stored locally in ${space}`
       this.storageResult = String(value)
+      this.applyStorageSubscriptionUpdate(space, canonical, value, 'local')
 
       if (space === 'public' || space === 'frozen') {
         try {
@@ -400,10 +664,12 @@ export default {
           })
           this.storageStatus = `Stored in ${space} (broadcast)`
           this.storageResult = String(value)
+          this.applyStorageSubscriptionUpdate(space, canonical, value, 'broadcast')
         } catch (err) {
           console.error('Storage put broadcast failed', err)
           this.storageStatus = `Stored locally in ${space}, broadcast failed`
           this.storageResult = String(value)
+          this.applyStorageSubscriptionUpdate(space, canonical, value, 'local')
         }
       }
     },
@@ -429,6 +695,7 @@ export default {
         this.storageValue = String(value)
         this.storageStatus = `Found locally in ${space}`
         this.storageResult = String(value)
+        this.applyStorageSubscriptionUpdate(space, canonical, value, 'local')
         return
       }
 
@@ -469,9 +736,11 @@ export default {
         return
       }
       store.set(canonical, value)
+      this.persistUiStorageValue(space, canonical, value)
       this.storageValue = String(value)
       this.storageStatus = `Found in ${space}`
       this.storageResult = String(value)
+      this.applyStorageSubscriptionUpdate(space, canonical, value, 'network')
     },
 
     handleStorageMessage(message, local) {
@@ -492,6 +761,8 @@ export default {
           return
         }
         store.set(key, incomingValue)
+        this.persistUiStorageValue(space, key, incomingValue)
+        this.applyStorageSubscriptionUpdate(space, key, incomingValue, local ? 'local' : 'network')
         return
       }
 
@@ -506,6 +777,30 @@ export default {
         const value = store.get(key)
         try {
           // Respond directly (multi-hop) so we don't spam the whole room.
+          this.gossip.direct(requester, String(value), {
+            kind: 'storage',
+            op: 'resp',
+            space,
+            key,
+            requester,
+            requestId,
+          })
+        } catch {
+          // ignore
+        }
+        return
+      }
+
+      if (op === 'sub') {
+        // Respond only for public/frozen.
+        if (!(space === 'public' || space === 'frozen')) return
+        const requester = meta?.requester
+        const requestId = meta?.requestId
+        if (!requester || !requestId) return
+        if (!store.has(key)) return
+
+        const value = store.get(key)
+        try {
           this.gossip.direct(requester, String(value), {
             kind: 'storage',
             op: 'resp',
