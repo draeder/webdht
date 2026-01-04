@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test:e2e": "playwright test"
+    "test": "npm run build && playwright test --reporter=line --workers=6"
   },
   "keywords": [
     "webrtc",
