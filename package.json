@@ -9,10 +9,18 @@
     "build": "vite build",
     "preview": "vite preview"
   },
-  "keywords": ["webrtc", "p2p", "partialmesh", "gossip", "vue", "vite"],
+  "keywords": [
+    "webrtc",
+    "p2p",
+    "partialmesh",
+    "gossip",
+    "vue",
+    "vite"
+  ],
   "license": "MIT",
   "dependencies": {
     "gossip-protocol": "^1.0.0",
+    "unsea": "^1.1.2",
     "vue": "^3.4.0"
   },
   "devDependencies": {

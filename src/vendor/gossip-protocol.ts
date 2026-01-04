@@ -13,6 +13,11 @@ export type GossipMessage = {
   type: 'gossip';
 };
 
+export type GossipDirectMetadata = {
+  kind: 'direct';
+  target: string;
+};
+
 export type GossipStats = {
   totalMessagesTracked: number;
   recentMessages: Array<{
@@ -82,6 +87,47 @@ export class GossipProtocol {
       sender,
       data,
       metadata,
+      type: 'gossip',
+    };
+
+    this.messageLog.set(message.id, {
+      timestamp: message.timestamp,
+      sender: message.sender,
+      hops: 0,
+    });
+
+    this.propagate(message);
+    this.emit('messageReceived', { message, local: true });
+    return message.id;
+  }
+
+  /**
+   * Best-effort direct message delivery to a target peer using the same multi-hop
+   * gossip propagation mechanism.
+   *
+   * Note: This will still traverse intermediate peers; recipients should filter
+   * by metadata.target.
+   */
+  direct(targetPeerId: string, data: unknown, metadata: Record<string, unknown> = {}): string {
+    const sender = this.mesh.getClientId();
+    const target = (targetPeerId ?? '').trim();
+    if (!target) {
+      throw new Error('direct() requires a targetPeerId');
+    }
+
+    const directMeta: GossipDirectMetadata = {
+      kind: 'direct',
+      target,
+    };
+
+    const message: GossipMessage = {
+      id: this.generateMessageId(sender),
+      timestamp: Date.now(),
+      hops: 0,
+      maxHops: this.maxHops,
+      sender,
+      data,
+      metadata: { ...metadata, ...directMeta },
       type: 'gossip',
     };
 

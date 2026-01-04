@@ -315,6 +315,9 @@ class DHT extends EventEmitter {
       this.storageTimestamps = new Map();
       this.keyMapping = new Map(); // Map from hash to original key name
 
+      // Storage space support (namespacing + basic policy enforcement)
+      this.STORAGE_SPACES = new Set(["public", "user", "private", "frozen"]);
+
       // Initialize peer connections
       this.peers = new Map();
       
@@ -1447,8 +1450,31 @@ class DHT extends EventEmitter {
 
     // Check local storage first
     if (this.storage.has(keyHashHex)) {
-      const value = this.storage.get(keyHashHex).value;
-      if (typeof value !== "undefined") {
+      const stored = this.storage.get(keyHashHex);
+      const meta = stored?.meta;
+
+      // Enforce basic space policy on responses.
+      // NOTE: This is best-effort only; there is no cryptographic identity binding.
+      if (meta && (meta.space === "private" || meta.space === "user")) {
+        const owner = meta.owner;
+        if (owner && message.sender !== owner) {
+          // Treat as not found for non-owner.
+          // Fall through to the closest-nodes response.
+        } else {
+          const value = stored?.value;
+          if (typeof value !== "undefined") {
+            peer.send({
+              type: "FIND_VALUE_RESPONSE",
+              sender: this.nodeIdHex,
+              value: value,
+              key: keyHashHex,
+            });
+            return;
+          }
+        }
+      } else {
+        const value = stored?.value;
+        if (typeof value !== "undefined") {
         peer.send({
           type: "FIND_VALUE_RESPONSE",
           sender: this.nodeIdHex,
@@ -1456,6 +1482,7 @@ class DHT extends EventEmitter {
           key: keyHashHex,
         });
         return;
+      }
       }
     }
 
@@ -1588,6 +1615,74 @@ class DHT extends EventEmitter {
       }
     }
 
+    // Optional storage space metadata
+    const meta =
+      message && typeof message.meta === "object" && message.meta
+        ? { ...message.meta }
+        : null;
+
+    // Basic policy enforcement for spaces. This is *not* secure without signatures,
+    // but provides a consistent local/remote rule set.
+    if (meta && meta.space) {
+      const space = String(meta.space);
+      if (!this.STORAGE_SPACES.has(space)) {
+        peer.send({
+          type: "STORE_RESPONSE",
+          sender: this.nodeIdHex,
+          success: false,
+          key: keyStr,
+          error: "Invalid storage space",
+        });
+        return;
+      }
+
+      if ((space === "private" || space === "user") && meta.owner) {
+        // Only allow the owner to write, and require sender consistency.
+        if (meta.owner !== message.sender || peerId !== message.sender) {
+          peer.send({
+            type: "STORE_RESPONSE",
+            sender: this.nodeIdHex,
+            success: false,
+            key: keyStr,
+            error: "Not allowed to write to this space",
+          });
+          return;
+        }
+      }
+
+      if (space === "frozen") {
+        // First write wins (idempotent if same value).
+        const existing = this.storage.get(keyHashHex);
+        if (existing && existing.value !== undefined) {
+          const sameValue = (() => {
+            try {
+              if (existing.value === value) return true;
+              const a =
+                typeof existing.value === "string"
+                  ? existing.value
+                  : JSON.stringify(existing.value);
+              const b =
+                typeof value === "string" ? value : JSON.stringify(value);
+              return a === b;
+            } catch {
+              return false;
+            }
+          })();
+
+          if (!sameValue) {
+            peer.send({
+              type: "STORE_RESPONSE",
+              sender: this.nodeIdHex,
+              success: false,
+              key: keyStr,
+              error: "Frozen key already set",
+            });
+            return;
+          }
+        }
+      }
+    }
+
     // Store the value
     // Store with metadata structure for consistency with put() method
     const timestamp = Date.now();
@@ -1595,6 +1690,7 @@ class DHT extends EventEmitter {
       value,
       timestamp,
       replicatedTo: new Set(),
+      ...(meta ? { meta } : {}),
     });
     this.storageTimestamps.set(keyHashHex, timestamp);
     this.keyMapping.set(keyHashHex, keyStr); // Store original key name
@@ -2371,6 +2467,7 @@ class DHT extends EventEmitter {
             sender: this.nodeIdHex,
             key: originalKey, // Use original key name for replication
             value: storedData.value, // Send only the value, not the metadata
+            ...(storedData.meta ? { meta: storedData.meta } : {}),
           });
         }
       });
@@ -2395,6 +2492,7 @@ class DHT extends EventEmitter {
             sender: this.nodeIdHex,
             key: originalKey, // Use original key name for republication
             value: storedData.value, // Send only the value, not the metadata
+            ...(storedData.meta ? { meta: storedData.meta } : {}),
           });
         }
       });
@@ -2436,10 +2534,164 @@ class DHT extends EventEmitter {
             sender: this.nodeIdHex,
             key: originalKey, // Use original key name for replication
             value: storedData.value, // Send only the value, not the metadata
+            ...(storedData.meta ? { meta: storedData.meta } : {}),
           });
         }
       }
     }
+  }
+
+  /**
+   * Build a deterministic, namespaced key for a storage space.
+   * This is intentionally simple and compatible with existing SHA1 hashing.
+   * @private
+   */
+  _canonicalKeyForSpace(space, key, owner = null) {
+    const s = String(space || "public");
+    const k = String(key);
+    const o = owner || this.nodeIdHex;
+
+    if (!this.STORAGE_SPACES.has(s)) {
+      throw new Error(`Unknown storage space: ${s}`);
+    }
+
+    switch (s) {
+      case "public":
+        return `public:${k}`;
+      case "user":
+        return `user:${o}:${k}`;
+      case "private":
+        return `private:${o}:${k}`;
+      case "frozen":
+        return `frozen:${k}`;
+      default:
+        return `public:${k}`;
+    }
+  }
+
+  /**
+   * Store a value in a named storage space.
+   * - public: readable/writable by anyone
+   * - user: readable/writable only by owner (best-effort)
+   * - private: readable/writable only by owner (best-effort)
+   * - frozen: first write wins (immutable)
+   */
+  async putInSpace(space, key, value, options = {}) {
+    const owner = options.owner || this.nodeIdHex;
+    const canonicalKey = this._canonicalKeyForSpace(space, key, owner);
+
+    // Enforce frozen locally (first write wins)
+    if (String(space) === "frozen") {
+      const keyHashHex = bufferToHex(await sha1(canonicalKey));
+      const existing = this.storage.get(keyHashHex);
+      if (existing && existing.value !== undefined) {
+        const sameValue = (() => {
+          try {
+            if (existing.value === value) return true;
+            const a =
+              typeof existing.value === "string"
+                ? existing.value
+                : JSON.stringify(existing.value);
+            const b = typeof value === "string" ? value : JSON.stringify(value);
+            return a === b;
+          } catch {
+            return false;
+          }
+        })();
+        if (!sameValue) return false;
+      }
+    }
+
+    // Use existing put logic but include metadata in the STORE messages.
+    // We do this by performing a minimal inline variant here.
+    const keySize = Buffer.from(canonicalKey).length;
+    const valueSize =
+      typeof value === "string"
+        ? Buffer.from(value).length
+        : Buffer.from(JSON.stringify(value)).length;
+
+    if (keySize > this.MAX_KEY_SIZE) {
+      throw new Error(`Key size exceeds maximum (${this.MAX_KEY_SIZE} bytes)`);
+    }
+    if (valueSize > this.MAX_VALUE_SIZE) {
+      throw new Error(`Value size exceeds maximum (${this.MAX_VALUE_SIZE} bytes)`);
+    }
+
+    if (this.storage.size >= this.MAX_STORE_SIZE) {
+      const oldestKey = Array.from(this.storageTimestamps.keys()).sort(
+        (a, b) => this.storageTimestamps.get(a) - this.storageTimestamps.get(b)
+      )[0];
+      if (oldestKey) {
+        this.storage.delete(oldestKey);
+        this.storageTimestamps.delete(oldestKey);
+        this.keyMapping.delete(oldestKey);
+      }
+    }
+
+    const keyHashHex = bufferToHex(await sha1(canonicalKey));
+    const timestamp = Date.now();
+    const meta = {
+      space: String(space || "public"),
+      owner,
+    };
+
+    this.storage.set(keyHashHex, {
+      value,
+      timestamp,
+      replicatedTo: new Set(),
+      meta,
+    });
+    this.storageTimestamps.set(keyHashHex, timestamp);
+    this.keyMapping.set(keyHashHex, canonicalKey);
+
+    const nodes = await this.findNode(keyHashHex);
+    if (nodes.length === 0) return true;
+
+    const promises = nodes.map(async (node) => {
+      const peer = this.peers.get(node.id);
+      if (!peer || !peer.connected) return false;
+
+      return new Promise((resolve) => {
+        const timeout = setTimeout(() => resolve(false), 5000);
+
+        const responseHandler = (message, sender) => {
+          if (
+            sender !== node.id ||
+            message.type !== "STORE_RESPONSE" ||
+            message.key !== canonicalKey
+          ) {
+            return;
+          }
+          clearTimeout(timeout);
+          peer.removeListener("message", responseHandler);
+
+          if (message.success) {
+            const stored = this.storage.get(keyHashHex);
+            if (stored) stored.replicatedTo.add(node.id);
+          }
+          resolve(Boolean(message.success));
+        };
+
+        peer.on("message", responseHandler);
+        peer.send({
+          type: "STORE",
+          sender: this.nodeIdHex,
+          key: canonicalKey,
+          value,
+          meta,
+        });
+      });
+    });
+
+    const results = await Promise.all(promises);
+    return results.some(Boolean);
+  }
+
+  /** Retrieve a value from a named storage space. */
+  async getFromSpace(space, key, options = {}) {
+    const owner = options.owner || this.nodeIdHex;
+    const canonicalKey = this._canonicalKeyForSpace(space, key, owner);
+    return this.get(canonicalKey);
   }
 
   /**

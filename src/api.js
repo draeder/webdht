@@ -894,6 +894,44 @@ export async function putValue(key, value) {
 }
 
 /**
+ * Stores a key-value pair in a specific DHT storage space.
+ * Spaces: public | user | private | frozen
+ * @param {string} space - Storage space name.
+ * @param {string} key - The key to store.
+ * @param {*} value - The value to store.
+ * @param {object} [options] - Optional options (e.g. { owner }).
+ * @returns {Promise<boolean>} True if stored/replicated successfully.
+ */
+export async function putValueInSpace(space, key, value, options = {}) {
+  if (!dhtInstance) {
+    throw new Error("API Error: DHT not initialized.");
+  }
+  if (!space) {
+    throw new Error("API Error: Space is required for putValueInSpace.");
+  }
+  if (!key) {
+    throw new Error("API Error: Key is required for putValueInSpace.");
+  }
+  if (value === undefined || value === null) {
+    throw new Error("API Error: Value is required for putValueInSpace.");
+  }
+
+  uiAdapter.updateStatus(`Storing value in ${space} space for key: ${key}...`);
+  try {
+    const success = await dhtInstance.putInSpace(space, key, value, options);
+    const message = success
+      ? `Value stored successfully in ${space}`
+      : `Failed to store value in ${space}`;
+    uiAdapter.updateStatus(`${message} for key: ${key}`);
+    return success;
+  } catch (err) {
+    _logDebug("API: Failed to store value in space:", err);
+    uiAdapter.updateStatus(`Error storing value: ${err.message}`, true);
+    throw err;
+  }
+}
+
+/**
  * Retrieves a value from the DHT.
  * @param {string} key - The key to retrieve.
  * @returns {Promise<string|null>} A promise that resolves with the value or null if not found.
@@ -916,6 +954,41 @@ export async function getValue(key) {
     return value;
   } catch (err) {
     _logDebug("API: Failed to retrieve value:", err);
+    uiAdapter.updateStatus(`Error retrieving value: ${err.message}`, true);
+    throw err;
+  }
+}
+
+/**
+ * Retrieves a value from a specific DHT storage space.
+ * Spaces: public | user | private | frozen
+ * @param {string} space - Storage space name.
+ * @param {string} key - The key to retrieve.
+ * @param {object} [options] - Optional options (e.g. { owner }).
+ * @returns {Promise<any|null>} Value or null.
+ */
+export async function getValueFromSpace(space, key, options = {}) {
+  if (!dhtInstance) {
+    throw new Error("API Error: DHT not initialized.");
+  }
+  if (!space) {
+    throw new Error("API Error: Space is required for getValueFromSpace.");
+  }
+  if (!key) {
+    throw new Error("API Error: Key is required for getValueFromSpace.");
+  }
+
+  uiAdapter.updateStatus(`Retrieving value from ${space} space for key: ${key}...`);
+  try {
+    const value = await dhtInstance.getFromSpace(space, key, options);
+    const message =
+      value !== null
+        ? `Retrieved value from ${space} for key: ${key}`
+        : `Value not found in ${space} for key: ${key}`;
+    uiAdapter.updateStatus(message);
+    return value;
+  } catch (err) {
+    _logDebug("API: Failed to retrieve value from space:", err);
     uiAdapter.updateStatus(`Error retrieving value: ${err.message}`, true);
     throw err;
   }

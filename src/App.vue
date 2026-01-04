@@ -4,6 +4,10 @@
       <h1>WebDHT</h1>
       <div class="node-info">
         <p>Node ID: <code>{{ nodeIdShort }}</code></p>
+        <p>
+          Pub Key:
+          <code :title="publicKey">{{ publicKeyShort }}</code>
+        </p>
         <p>Connected Peers: <strong>{{ connectedPeers.length }}</strong></p>
         <p class="status" :class="connected ? 'online' : 'offline'">
           {{ connected ? '🟢 Online' : '🔴 Offline' }}
@@ -28,14 +32,47 @@
         </div>
       </section>
 
+      <section class="section storage">
+        <h2>Storage</h2>
+        <div class="settings-group">
+          <label>Space:</label>
+          <select v-model="storageSpace" class="select">
+            <option value="public">public</option>
+            <option value="user">user</option>
+            <option value="private">private</option>
+            <option value="frozen">frozen</option>
+          </select>
+        </div>
+        <div class="settings-group">
+          <label>Key:</label>
+          <input v-model="storageKey" type="text" placeholder="my-key" class="input" />
+        </div>
+        <div class="settings-group">
+          <label>Value:</label>
+          <input v-model="storageValue" type="text" placeholder="my-value" class="input" />
+        </div>
+        <div class="settings-group" style="display:flex; gap:0.5rem;">
+          <button @click="putStorage" class="btn">Put</button>
+          <button @click="getStorage" class="btn">Get</button>
+        </div>
+        <div v-if="storageStatus" class="empty" style="margin-top:0.5rem;">
+          <p>{{ storageStatus }}</p>
+        </div>
+        <div v-if="storageResult !== ''" class="empty" style="margin-top:0.5rem;">
+          <p>Result:</p>
+          <p style="word-break: break-word;">{{ storageResult }}</p>
+        </div>
+      </section>
+
       <section class="section peers">
-        <h2>Connected Peers</h2>
-        <div v-if="connectedPeers.length === 0" class="empty">
-          <p>No connected peers yet. Waiting for peers to join...</p>
+        <h2>Peers</h2>
+        <div v-if="allPeers.length === 0" class="empty">
+          <p>No peers yet. Waiting for peers to join...</p>
         </div>
         <ul v-else class="peer-list">
-          <li v-for="peer in connectedPeers" :key="peer" class="peer-item">
+          <li v-for="peer in allPeers" :key="peer" class="peer-item">
             <span class="peer-id">{{ peer.substring(0, 16) }}...</span>
+            <span class="peer-kind">{{ connectedPeers.includes(peer) ? 'direct' : 'indirect' }}</span>
           </li>
         </ul>
       </section>
@@ -57,7 +94,7 @@
         <div class="message-input">
           <select v-model="selectedPeer" class="select">
             <option value="">Broadcast...</option>
-            <option v-for="peer in connectedPeers" :key="peer" :value="peer">
+            <option v-for="peer in allPeers" :key="peer" :value="peer">
               {{ peer.substring(0, 12) }}...
             </option>
           </select>
@@ -82,6 +119,7 @@
 <script>
 import { PartialMesh } from './vendor/partialmesh.ts'
 import { GossipProtocol } from './vendor/gossip-protocol.ts'
+import { generateRandomPair } from 'unsea'
 
 function buildIceServers() {
   const servers = [
@@ -104,21 +142,63 @@ export default {
       gossip: null,
       mesh: null,
       nodeIdShort: '',
+      identity: null,
+      publicKey: '',
       connectedPeers: [],
+      discoveredPeers: [],
       messages: [],
       selectedPeer: '',
       messageText: '',
+      storageSpace: 'public',
+      storageKey: '',
+      storageValue: '',
+      storageStatus: '',
+      storageResult: '',
+      storageLocal: {
+        public: new Map(),
+        user: new Map(),
+        private: new Map(),
+        frozen: new Map(),
+      },
+      pendingStorageGets: new Map(),
       signalingServer: 'wss://signal.peer.ooo/ws',
       signalingRoom: 'webdht-test',
       connected: false,
       signalingWs: null,
       clientId: null,
+      peerSyncTimer: null,
+    }
+  },
+  computed: {
+    publicKeyShort() {
+      if (!this.publicKey) return ''
+      return this.publicKey.length > 22
+        ? `${this.publicKey.slice(0, 22)}…`
+        : this.publicKey
+    },
+    allPeers() {
+      const unique = new Set([...(this.connectedPeers || []), ...(this.discoveredPeers || [])]);
+      const selfId = this.clientId;
+      if (selfId) unique.delete(selfId);
+      return Array.from(unique);
     }
   },
   mounted() {
+    this.initIdentity()
     this.setupMesh()
   },
   methods: {
+    async initIdentity() {
+      try {
+        const identity = await generateRandomPair()
+        this.identity = identity
+        this.publicKey = identity?.pub ? String(identity.pub) : ''
+      } catch (err) {
+        console.error('Failed to initialize unsea identity', err)
+        this.identity = null
+        this.publicKey = ''
+      }
+    },
     async setupMesh() {
       this.mesh = new PartialMesh({
         sessionId: this.signalingRoom,
@@ -136,6 +216,18 @@ export default {
         this.clientId = data.clientId
         this.nodeIdShort = data.clientId?.substring(0, 8) || ''
         this.connected = true
+
+        // Keep peer lists accurate even when peers leave the room.
+        if (this.peerSyncTimer) clearInterval(this.peerSyncTimer)
+        this.peerSyncTimer = setInterval(() => {
+          try {
+            if (!this.mesh) return
+            this.connectedPeers = this.mesh.getConnectedPeers()
+            this.discoveredPeers = this.mesh.getDiscoveredPeers()
+          } catch {
+            // best-effort
+          }
+        }, 1500)
       })
 
       this.mesh.on('signaling:disconnected', () => {
@@ -144,6 +236,12 @@ export default {
         this.clientId = null
         this.nodeIdShort = ''
         this.connectedPeers = []
+        this.discoveredPeers = []
+
+        if (this.peerSyncTimer) {
+          clearInterval(this.peerSyncTimer)
+          this.peerSyncTimer = null
+        }
       })
 
       this.mesh.on('peer:connected', (peerId) => {
@@ -155,6 +253,9 @@ export default {
 
       this.mesh.on('peer:discovered', (peerId) => {
         console.log('🔎 Discovered peer:', peerId)
+        if (!this.discoveredPeers.includes(peerId)) {
+          this.discoveredPeers.push(peerId)
+        }
       })
 
       this.mesh.on('peer:disconnected', (peerId) => {
@@ -175,8 +276,26 @@ export default {
 
       this.gossip.on('messageReceived', (data) => {
         const { message, local, fromPeer } = data
+
+        const meta = message?.metadata || {}
+        const kind = meta?.kind
+
+        // Handle storage control messages (do not show in chat UI)
+        if (kind === 'storage') {
+          this.handleStorageMessage(message, local)
+          return
+        }
+
+        const target = meta?.target
+        const isDirect = kind === 'direct' && typeof target === 'string' && target.length > 0
+
+        // For direct messages, only display on the target (unless local).
+        if (isDirect && !local) {
+          if (!this.clientId || target !== this.clientId) return
+        }
+
         this.messages.push({
-          peer: message.sender || fromPeer || 'unknown',
+          peer: isDirect && local ? target : (message.sender || fromPeer || 'unknown'),
           text: String(message.data),
           outgoing: local,
           time: new Date(message.timestamp).toLocaleTimeString()
@@ -193,6 +312,11 @@ export default {
       if (this.mesh) {
         this.mesh.destroy()
       }
+
+      if (this.peerSyncTimer) {
+        clearInterval(this.peerSyncTimer)
+        this.peerSyncTimer = null
+      }
       await this.setupMesh()
     },
     sendMessage() {
@@ -201,9 +325,9 @@ export default {
       const text = this.messageText
 
       if (this.selectedPeer) {
-        // For direct messages, we still use mesh.send since gossip is for broadcast
+        // For direct messages, use gossip so it can reach indirect peers too.
         try {
-          this.mesh.send(this.selectedPeer, text)
+          this.gossip.direct(this.selectedPeer, text)
         } catch (err) {
           console.error('Failed to send to peer', err)
         }
@@ -216,14 +340,194 @@ export default {
         }
       }
 
-      this.messages.push({
-        peer: this.selectedPeer || 'broadcast',
-        text,
-        outgoing: true,
-        time: new Date().toLocaleTimeString()
+      this.messageText = ''
+    },
+
+    canonicalStorageKey(space, key) {
+      const k = String(key || '').trim()
+      const owner = this.clientId || 'unknown'
+      if (!k) return ''
+      if (space === 'public') return `public:${k}`
+      if (space === 'frozen') return `frozen:${k}`
+      if (space === 'user') return `user:${owner}:${k}`
+      if (space === 'private') return `private:${owner}:${k}`
+      return `public:${k}`
+    },
+
+    makeRequestId() {
+      return `${this.clientId || 'unknown'}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    },
+
+    putStorage() {
+      if (!this.gossip) return
+      const space = this.storageSpace
+      const key = String(this.storageKey || '').trim()
+      const value = this.storageValue
+      if (!key) {
+        this.storageStatus = 'Key is required'
+        return
+      }
+      if (value === undefined || value === null || String(value).length === 0) {
+        this.storageStatus = 'Value is required'
+        return
+      }
+
+      const canonical = this.canonicalStorageKey(space, key)
+      const store = this.storageLocal?.[space]
+      if (!store) {
+        this.storageStatus = 'Unknown space'
+        return
+      }
+
+      if (space === 'frozen' && store.has(canonical) && store.get(canonical) !== value) {
+        this.storageStatus = 'Frozen key already set'
+        return
+      }
+
+      // user/private are local-only (best-effort privacy without crypto)
+      store.set(canonical, value)
+      this.storageStatus = `Stored locally in ${space}`
+      this.storageResult = String(value)
+
+      if (space === 'public' || space === 'frozen') {
+        try {
+          this.gossip.broadcast(value, {
+            kind: 'storage',
+            op: 'put',
+            space,
+            key: canonical,
+            owner: this.clientId,
+          })
+          this.storageStatus = `Stored in ${space} (broadcast)`
+          this.storageResult = String(value)
+        } catch (err) {
+          console.error('Storage put broadcast failed', err)
+          this.storageStatus = `Stored locally in ${space}, broadcast failed`
+          this.storageResult = String(value)
+        }
+      }
+    },
+
+    async getStorage() {
+      if (!this.gossip) return
+      const space = this.storageSpace
+      const key = String(this.storageKey || '').trim()
+      if (!key) {
+        this.storageStatus = 'Key is required'
+        return
+      }
+
+      const canonical = this.canonicalStorageKey(space, key)
+      const store = this.storageLocal?.[space]
+      if (!store) {
+        this.storageStatus = 'Unknown space'
+        return
+      }
+
+      if (store.has(canonical)) {
+        const value = store.get(canonical)
+        this.storageValue = String(value)
+        this.storageStatus = `Found locally in ${space}`
+        this.storageResult = String(value)
+        return
+      }
+
+      if (!(space === 'public' || space === 'frozen')) {
+        this.storageStatus = `Not found locally in ${space} (not broadcast)`
+        this.storageResult = ''
+        return
+      }
+
+      const requestId = this.makeRequestId()
+      this.storageStatus = `Looking up in ${space}...`
+
+      const p = new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          this.pendingStorageGets.delete(requestId)
+          resolve(null)
+        }, 5000)
+        this.pendingStorageGets.set(requestId, { resolve, timeout, space, key: canonical })
       })
 
-      this.messageText = ''
+      try {
+        this.gossip.broadcast('', {
+          kind: 'storage',
+          op: 'get',
+          space,
+          key: canonical,
+          requester: this.clientId,
+          requestId,
+        })
+      } catch (err) {
+        console.error('Storage get broadcast failed', err)
+      }
+
+      const value = await p
+      if (value === null || value === undefined) {
+        this.storageStatus = `Not found in ${space}`
+        this.storageResult = ''
+        return
+      }
+      store.set(canonical, value)
+      this.storageValue = String(value)
+      this.storageStatus = `Found in ${space}`
+      this.storageResult = String(value)
+    },
+
+    handleStorageMessage(message, local) {
+      const meta = message?.metadata || {}
+      const op = meta?.op
+      const space = meta?.space
+      const key = meta?.key
+
+      if (!space || !key) return
+      const store = this.storageLocal?.[space]
+      if (!store) return
+
+      if (op === 'put') {
+        // Accept public/frozen puts from network.
+        if (!(space === 'public' || space === 'frozen')) return
+        const incomingValue = String(message.data)
+        if (space === 'frozen' && store.has(key) && store.get(key) !== incomingValue) {
+          return
+        }
+        store.set(key, incomingValue)
+        return
+      }
+
+      if (op === 'get') {
+        // Respond only for public/frozen.
+        if (!(space === 'public' || space === 'frozen')) return
+        const requester = meta?.requester
+        const requestId = meta?.requestId
+        if (!requester || !requestId) return
+        if (!store.has(key)) return
+
+        const value = store.get(key)
+        try {
+          // Respond directly (multi-hop) so we don't spam the whole room.
+          this.gossip.direct(requester, String(value), {
+            kind: 'storage',
+            op: 'resp',
+            space,
+            key,
+            requester,
+            requestId,
+          })
+        } catch {
+          // ignore
+        }
+        return
+      }
+
+      if (op === 'resp') {
+        const requestId = meta?.requestId
+        const pending = requestId ? this.pendingStorageGets.get(requestId) : null
+        if (!pending) return
+        clearTimeout(pending.timeout)
+        this.pendingStorageGets.delete(requestId)
+        pending.resolve(String(message.data))
+      }
     }
   }
 }

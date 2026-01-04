@@ -138,9 +138,9 @@ Modernized WebDHT frontend built with **Vue 3** and **Vite**, wired to peer-to-p
 - [partialmesh](https://github.com/draeder/partialmesh) for WebRTC partial-mesh topology
 - [gossip-protocol](https://github.com/draeder/gossip-protocol) for message re-propagation
 - [UniWRTC](https://github.com/draeder/UniWRTC) for WebSocket signaling
-- [unsea](https://github.com/draeder/unsea) for key generation and message signing
+- [unsea](https://github.com/draeder/unsea) for identity key generation (public key displayed in the UI)
 
-The new console lets you join a session, observe discovered/connected peers, and broadcast signed messages across the mesh.
+The new console lets you join a session, observe discovered/connected peers, and broadcast messages across the mesh.
 
 ## Quick start
 
@@ -171,16 +171,16 @@ By default the app points at the public signaling service `wss://signal.peer.ooo
 - Rebuilt as a Vite + Vue 3 SPA (no legacy Express/server demo required).
 - Mesh connectivity uses `PartialMesh` (from `partialmesh`) with UniWRTC signaling for discovery.
 - Gossip propagation handled by `GossipProtocol` for bounded-hop re-broadcasts.
-- Unsea generates an identity keypair and signs/validates each gossip payload.
+- Identity keypair generated via Unsea (public key shown in the header).
 - UniWRTC is also used directly for a quick signaling “probe” and room listing.
 
 ## App flow
 
-1. **Generate keys** — Unsea creates a signing keypair shown in the header badge.
-2. **Configure mesh** — Set session ID, signaling server, min/max peers, and gossip hop limit.
-3. **Start mesh** — PartialMesh connects to UniWRTC, auto-discovers peers, and becomes ready once `minPeers` are connected.
-4. **Broadcast** — Type a message and send; GossipProtocol distributes it to peers and verifies signatures on receipt.
-5. **Inspect** — Watch connected/discovered peers, gossip stats, and activity logs in real time.
+1. **Generate identity** — Unsea generates an identity keypair (public key shown in the header).
+2. **Configure mesh** — Set session ID and signaling server.
+3. **Start mesh** — PartialMesh connects to UniWRTC, auto-discovers peers, and becomes ready once peers are connected.
+4. **Broadcast** — Type a message and send; GossipProtocol distributes it to peers.
+5. **Inspect** — Watch connected/discovered peers and activity logs in real time.
 
 ## Scripts
 
@@ -238,7 +238,10 @@ By default the app points at the public signaling service `wss://signal.peer.ooo
 
 - The public signaling host is shared. Use unique session IDs in development to avoid cross-talk.
 - The legacy DHT and chess demo code remain in the repository for reference but are not used by the new UI.
-- All cryptographic operations (keygen, signing, verification) are handled by Unsea in-browser.
+
+### Unsea
+
+Unsea is currently used for in-browser identity key generation and public key display.
 
 ## License
 

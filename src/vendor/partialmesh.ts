@@ -45,6 +45,7 @@ export class PartialMesh {
   private peers: Map<string, PeerConnection> = new Map();
   private uniwrtcClient: any = null;
   private discoveredPeers: Set<string> = new Set();
+  private discoveredPeerLastSeenAtMs: Map<string, number> = new Map();
   private clientId: string | null = null;
   private eventHandlers: Map<keyof PartialMeshEvents, Set<Function>> = new Map();
   private connecting: Set<string> = new Set();
@@ -54,6 +55,7 @@ export class PartialMesh {
   private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
   private underConnectedSinceMs: number | null = null;
   private lastHardResetAtMs: number = 0;
+  private lastSessionRefreshAtMs: number = 0;
 
   constructor(config: PartialMeshConfig = {}) {
     this.config = {
@@ -166,13 +168,46 @@ export class PartialMesh {
     this.uniwrtcClient.on('joined', (data: { sessionId: string; clients: string[] }) => {
       const selfId = this.normalizePeerId(this.clientId);
       this.log('Joined session', data.sessionId, 'with peers', data.clients?.length ?? 0);
-      data.clients.forEach((rawPeerId: string) => {
+
+      const now = Date.now();
+
+      // Reconcile the discovered peer set from the snapshot so peers that left
+      // don't linger as "ghost" indirect peers.
+      const prev = new Set(this.discoveredPeers);
+      const next = new Set<string>();
+
+      (data.clients ?? []).forEach((rawPeerId: string) => {
         const peerId = this.normalizePeerId(rawPeerId);
         if (peerId && peerId !== selfId) {
-          this.discoveredPeers.add(peerId);
-          this.emit('peer:discovered', peerId);
+          next.add(peerId);
+          this.discoveredPeerLastSeenAtMs.set(peerId, now);
         }
       });
+
+      // Keep currently-connected peers in the candidate set even if the snapshot is briefly stale.
+      for (const peerId of this.getConnectedPeers()) {
+        const normalized = this.normalizePeerId(peerId);
+        if (normalized && normalized !== selfId) {
+          next.add(normalized);
+          this.discoveredPeerLastSeenAtMs.set(normalized, now);
+        }
+      }
+
+      this.discoveredPeers = next;
+
+      // Drop stale last-seen entries that no longer exist in the discovered set.
+      for (const peerId of Array.from(this.discoveredPeerLastSeenAtMs.keys())) {
+        if (!this.discoveredPeers.has(peerId)) {
+          this.discoveredPeerLastSeenAtMs.delete(peerId);
+        }
+      }
+
+      // Emit discovered for newly-seen peers only.
+      for (const peerId of next) {
+        if (!prev.has(peerId)) {
+          this.emit('peer:discovered', peerId);
+        }
+      }
       if (this.config.autoConnect) {
         this.maintainPeerConnections();
       }
@@ -183,6 +218,7 @@ export class PartialMesh {
       const peerId = this.normalizePeerId(data.peerId);
       if (peerId && peerId !== selfId) {
         this.discoveredPeers.add(peerId);
+        this.discoveredPeerLastSeenAtMs.set(peerId, Date.now());
         this.emit('peer:discovered', peerId);
         this.log('Peer joined', peerId);
         if (this.config.autoConnect) {
@@ -195,6 +231,7 @@ export class PartialMesh {
       const peerId = this.normalizePeerId(data.peerId);
       if (!peerId) return;
       this.discoveredPeers.delete(peerId);
+      this.discoveredPeerLastSeenAtMs.delete(peerId);
       this.removePeer(peerId, true);
       this.log('Peer left', peerId);
     });
@@ -229,10 +266,25 @@ export class PartialMesh {
       try {
         this.maintainPeerConnections();
         this.maybeHardResetUnderConnected();
+        this.maybeRefreshSessionPeers();
       } catch {
         // ignore
       }
     }, this.config.maintenanceIntervalMs);
+  }
+
+  private maybeRefreshSessionPeers(): void {
+    if (!this.uniwrtcClient) return;
+    if (!this.config.sessionId) return;
+    const now = Date.now();
+    // Refresh at a low frequency to avoid spamming public servers.
+    if (now - this.lastSessionRefreshAtMs < 10_000) return;
+    this.lastSessionRefreshAtMs = now;
+    try {
+      this.uniwrtcClient.joinSession(this.config.sessionId);
+    } catch {
+      // best-effort
+    }
   }
 
   private maybeHardResetUnderConnected(): void {
@@ -561,7 +613,26 @@ export class PartialMesh {
   }
 
   public getDiscoveredPeers(): string[] {
-    return Array.from(this.discoveredPeers);
+    // Expire peers that haven't been seen in a while. This protects against
+    // public signaling servers that sometimes retain stale session rosters.
+    const now = Date.now();
+    const ttlMs = 30_000;
+
+    const connected = new Set(this.getConnectedPeers());
+    const result: string[] = [];
+
+    for (const peerId of this.discoveredPeers) {
+      if (connected.has(peerId)) {
+        result.push(peerId);
+        continue;
+      }
+      const lastSeen = this.discoveredPeerLastSeenAtMs.get(peerId);
+      if (lastSeen != null && now - lastSeen <= ttlMs) {
+        result.push(peerId);
+      }
+    }
+
+    return result;
   }
 
   public getPeerCount(): number {
@@ -618,9 +689,11 @@ export class PartialMesh {
     this.peers.clear();
     this.connecting.clear();
     this.discoveredPeers.clear();
+    this.discoveredPeerLastSeenAtMs.clear();
     this.clientId = null;
     this.underConnectedSinceMs = null;
     this.lastHardResetAtMs = 0;
+    this.lastSessionRefreshAtMs = 0;
 
     if (this.uniwrtcClient) {
       this.uniwrtcClient.disconnect();
