@@ -4,6 +4,11 @@ import type { Instance as SimplePeerInstance } from 'simple-peer';
 export interface PartialMeshConfig {
   minPeers?: number;
   maxPeers?: number;
+  /**
+   * When true, the mesh will not proactively disconnect peers (no swaps/evictions/shuffles),
+   * and will not hard-reset the mesh. Note: peers can still disconnect due to WebRTC/network.
+   */
+  neverDisconnectPeers?: boolean;
   signalingServer?: string;
   sessionId?: string;
   autoDiscover?: boolean;
@@ -50,6 +55,10 @@ export class PartialMesh {
   private uniwrtcClient: any = null;
   private discoveredPeers: Set<string> = new Set();
   private discoveredPeerLastSeenAtMs: Map<string, number> = new Map();
+  // Public signaling can reorder messages; ICE candidates may arrive before the
+  // corresponding offer/answer. Buffer them to avoid dropping early candidates
+  // (Firefox tends to be less forgiving when candidates are missing).
+  private pendingIceCandidates: Map<string, any[]> = new Map();
   private clientId: string | null = null;
   private selfHash32: number | null = null;
   private eventHandlers: Map<keyof PartialMeshEvents, Set<Function>> = new Map();
@@ -67,11 +76,14 @@ export class PartialMesh {
   private everReachedMinPeers: boolean = false;
   private isHardResetting: boolean = false;
   private lastBelowMinResetAtMs: number = 0;
+  private peersInGracePeriod: Set<string> = new Set();
+  private gracePeriodAnswers: Map<string, RTCSessionDescriptionInit> = new Map();
 
   constructor(config: PartialMeshConfig = {}) {
     this.config = {
       minPeers: config.minPeers ?? 2,
       maxPeers: config.maxPeers ?? 10,
+      neverDisconnectPeers: config.neverDisconnectPeers ?? false,
       signalingServer: config.signalingServer ?? 'wss://signal.peer.ooo',
       sessionId: config.sessionId ?? 'default-session',
       autoDiscover: config.autoDiscover ?? true,
@@ -109,6 +121,22 @@ export class PartialMesh {
   private log(...args: any[]): void {
     if (this.config.debug) {
       console.log('[PartialMesh]', ...args);
+    }
+  }
+
+  private describeCandidate(candidate: any): any {
+    try {
+      const candStr = String(candidate?.candidate ?? candidate ?? '');
+      const typ = /\btyp\s+(host|srflx|prflx|relay)\b/.exec(candStr)?.[1] ?? 'unknown';
+      const protocol = /\budp\b/i.test(candStr) ? 'udp' : (/\btcp\b/i.test(candStr) ? 'tcp' : 'unknown');
+      return {
+        typ,
+        protocol,
+        sdpMid: candidate?.sdpMid,
+        sdpMLineIndex: candidate?.sdpMLineIndex,
+      };
+    } catch {
+      return { typ: 'unknown' };
     }
   }
 
@@ -192,6 +220,14 @@ export class PartialMesh {
 
     const currentPeerCount = this.peers.size;
     const connectedCount = this.getConnectedPeers().length;
+
+    // In "never disconnect" mode, don't swap/evict to make room.
+    if (this.config.neverDisconnectPeers) {
+      if (currentPeerCount < this.config.maxPeers) {
+        this.connectToPeer(normalizedPeerId);
+      }
+      return;
+    }
 
     // If we have capacity, connect immediately.
     if (currentPeerCount < this.config.maxPeers) {
@@ -284,45 +320,41 @@ export class PartialMesh {
       this.log('Signaling disconnected');
     });
 
+    // When UniWRTC auto-reconnects, it fires 'connected' again but we need to rejoin.
+    // The 'connected' handler above already does joinSession, so we're covered.
+    // But we should also handle reconnection by clearing stale state if needed.
+
     this.uniwrtcClient.on('joined', (data: { sessionId: string; clients: string[] }) => {
       const selfId = this.normalizePeerId(this.clientId);
       this.log('Joined session', data.sessionId, 'with peers', data.clients?.length ?? 0);
 
       const now = Date.now();
 
-      // Reconcile the discovered peer set from the snapshot so peers that left
-      // don't linger as "ghost" indirect peers.
+      // IMPORTANT: do NOT treat the roster snapshot as authoritative.
+      // Public signaling rosters/events can be partial or briefly stale; replacing
+      // the discovered set makes "indirect" peers flicker/disappear.
+      // Instead, only refresh last-seen timestamps for peers present in the snapshot.
       const prev = new Set(this.discoveredPeers);
-      const next = new Set<string>();
 
       (data.clients ?? []).forEach((rawPeerId: string) => {
         const peerId = this.normalizePeerId(rawPeerId);
         if (peerId && peerId !== selfId) {
-          next.add(peerId);
+          this.discoveredPeers.add(peerId);
           this.discoveredPeerLastSeenAtMs.set(peerId, now);
         }
       });
 
-      // Keep currently-connected peers in the candidate set even if the snapshot is briefly stale.
+      // Ensure currently-connected peers remain marked as recently seen.
       for (const peerId of this.getConnectedPeers()) {
         const normalized = this.normalizePeerId(peerId);
         if (normalized && normalized !== selfId) {
-          next.add(normalized);
+          this.discoveredPeers.add(normalized);
           this.discoveredPeerLastSeenAtMs.set(normalized, now);
         }
       }
 
-      this.discoveredPeers = next;
-
-      // Drop stale last-seen entries that no longer exist in the discovered set.
-      for (const peerId of Array.from(this.discoveredPeerLastSeenAtMs.keys())) {
-        if (!this.discoveredPeers.has(peerId)) {
-          this.discoveredPeerLastSeenAtMs.delete(peerId);
-        }
-      }
-
       // Emit discovered for newly-seen peers only.
-      for (const peerId of next) {
+      for (const peerId of this.discoveredPeers) {
         if (!prev.has(peerId)) {
           this.emit('peer:discovered', peerId);
           this.maybeEagerConnectToDiscoveredPeer(peerId, 'joined');
@@ -353,6 +385,16 @@ export class PartialMesh {
       if (!peerId) return;
       this.discoveredPeers.delete(peerId);
       this.discoveredPeerLastSeenAtMs.delete(peerId);
+      // Never tear down a WebRTC peer purely because signaling says they left;
+      // public rosters can be stale/partial and WebRTC may still be healthy.
+      // In neverDisconnectPeers mode, we only forget discovery; the WebRTC link
+      // will close naturally if it is actually gone.
+      const pc = this.peers.get(peerId);
+      if (this.config.neverDisconnectPeers && pc?.connected) {
+        this.log('Ignoring peer-left for connected peer (neverDisconnectPeers)', { peerId });
+        return;
+      }
+
       this.removePeer(peerId, true);
       this.log('Peer left', peerId);
     });
@@ -368,7 +410,7 @@ export class PartialMesh {
     });
 
     this.uniwrtcClient.on('ice-candidate', async (data: { peerId: string; candidate: RTCIceCandidateInit }) => {
-      this.log('Received ice-candidate from', data.peerId);
+      this.log('Received ice-candidate from', data.peerId, this.describeCandidate(data?.candidate));
       await this.handleIceCandidate(data.peerId, data.candidate);
     });
 
@@ -396,6 +438,7 @@ export class PartialMesh {
   }
 
   private maybeHardResetBelowMinPeers(trigger: string): void {
+    if (this.config.neverDisconnectPeers) return;
     if (!this.config.restartOnBelowMinPeers) return;
     if (this.isHardResetting) return;
     if (!this.clientId) return;
@@ -405,6 +448,11 @@ export class PartialMesh {
       this.everReachedMinPeers = true;
       return;
     }
+
+    // If we have never reached minPeers, repeated resets are counter-productive
+    // (e.g., ICE/TURN limitations). In that case, keep discovery state stable
+    // and rely on per-peer backoff/retry rather than thrashing the whole mesh.
+    if (!this.everReachedMinPeers) return;
 
     const now = Date.now();
     if (now < this.bootstrapGraceUntilMs) return;
@@ -443,17 +491,33 @@ export class PartialMesh {
   }
 
   private maybeHardResetUnderConnected(): void {
+    if (this.config.neverDisconnectPeers) return;
     const thresholdMs = this.config.underConnectedResetMs;
     if (!thresholdMs || thresholdMs <= 0) return;
 
     const now = Date.now();
     if (now < this.bootstrapGraceUntilMs) return;
 
+    // Avoid thrashing in environments where we never manage to reach minPeers
+    // (e.g. ICE failures due to missing TURN). Resets won't help and can make
+    // indirect discovery appear to flicker.
+    if (!this.everReachedMinPeers) {
+      this.underConnectedSinceMs = null;
+      return;
+    }
+
     const connected = this.getConnectedPeers().length;
     const discovered = this.discoveredPeers.size;
     const hasEnoughCandidates = discovered >= this.config.minPeers;
     const underConnected = connected < this.config.minPeers;
     if (!underConnected) {
+      this.underConnectedSinceMs = null;
+      return;
+    }
+
+    // If we don't even have enough candidates, resetting can't repair the mesh.
+    // Wait for discovery to improve.
+    if (!hasEnoughCandidates) {
       this.underConnectedSinceMs = null;
       return;
     }
@@ -466,10 +530,14 @@ export class PartialMesh {
     if (now - this.underConnectedSinceMs < thresholdMs) return;
     if (now - this.lastHardResetAtMs < thresholdMs) return;
 
-    this.hardReset(hasEnoughCandidates ? 'under-connected' : 'under-connected-no-candidates');
+    this.hardReset('under-connected');
   }
 
   public hardReset(reason: string = 'manual'): void {
+    if (this.config.neverDisconnectPeers) {
+      this.log('Ignoring hardReset (neverDisconnectPeers)', { reason });
+      return;
+    }
     if (this.isHardResetting) return;
     this.isHardResetting = true;
 
@@ -478,9 +546,8 @@ export class PartialMesh {
     this.bootstrapGraceUntilMs = Date.now() + Math.max(0, this.config.bootstrapGraceMs);
     this.everReachedMinPeers = false;
 
-    // Clear discovery state so a reset actually re-derives the roster.
-    this.discoveredPeers.clear();
-    this.discoveredPeerLastSeenAtMs.clear();
+    // Keep discovery state across resets to avoid "indirect" peers disappearing.
+    // Expiry is handled via TTL in getDiscoveredPeers() and peer-left events.
 
     this.emit('mesh:reset', { reason });
 
@@ -542,7 +609,7 @@ export class PartialMesh {
     const underConnected = connectedCount < this.config.minPeers;
     const cannotInitiateNow =
       this.isCoolingDown(normalizedPeerId) ||
-      this.peers.size >= this.config.maxPeers ||
+      (!this.config.neverDisconnectPeers && this.peers.size >= this.config.maxPeers) ||
       this.connecting.size > 0 ||
       underConnected;
 
@@ -586,7 +653,7 @@ export class PartialMesh {
     // Ensure we have capacity to accept an inbound offer.
     // If we're saturated, evict a stale pending dial first; otherwise (if safe)
     // swap out a connected peer with slack above minPeers.
-    if (!peerConnection && this.peers.size >= this.config.maxPeers) {
+    if (!this.config.neverDisconnectPeers && !peerConnection && this.peers.size >= this.config.maxPeers) {
       const now = Date.now();
       const evictAfterMs = 8_000;
       const pending = Array.from(this.peers.values())
@@ -619,6 +686,7 @@ export class PartialMesh {
 
     try {
       peerConnection.peer.signal(offer);
+      this.flushPendingIceCandidates(normalizedPeerId);
     } catch (err) {
       console.error(`Error signaling offer from peer ${peerId}:`, err);
     }
@@ -630,6 +698,21 @@ export class PartialMesh {
     if (!normalizedPeerId || normalizedPeerId === selfId) return;
 
     const peerConnection = this.peers.get(normalizedPeerId);
+    
+    // If peer is in grace period (destroyed by ICE failure), buffer the answer
+    if (this.peersInGracePeriod.has(normalizedPeerId)) {
+      this.log('Answer arrived during grace period, buffering for retry', normalizedPeerId);
+      this.gracePeriodAnswers.set(normalizedPeerId, answer);
+      // Trigger immediate retry with buffered answer
+      this.peersInGracePeriod.delete(normalizedPeerId);
+      this.connecting.delete(normalizedPeerId);
+      if (peerConnection) {
+        this.peers.delete(normalizedPeerId);
+      }
+      await this.connectToPeer(normalizedPeerId);
+      return;
+    }
+    
     if (!peerConnection) return;
     if (!peerConnection.initiator) {
       // Only initiators should receive answers; ignore to avoid corrupting state.
@@ -638,6 +721,7 @@ export class PartialMesh {
 
     try {
       peerConnection.peer.signal(answer);
+      this.flushPendingIceCandidates(normalizedPeerId);
     } catch (err) {
       console.error(`Error signaling answer from peer ${peerId}:`, err);
     }
@@ -652,8 +736,56 @@ export class PartialMesh {
     if (peerConnection) {
       try {
         peerConnection.peer.signal({ type: 'candidate', candidate: candidate });
+        
+        // Firefox often declares ICE failed before srflx candidates arrive.
+        // If we get an srflx candidate and ICE already failed, restart.
+        const candDesc = this.describeCandidate(candidate);
+        if (candDesc.typ === 'srflx') {
+          try {
+            const pc: RTCPeerConnection | undefined = (peerConnection.peer as any)?._pc;
+            if (pc && pc.iceConnectionState === 'failed' && peerConnection.initiator) {
+              this.log('Received srflx after ICE failed, restarting', { peerId: normalizedPeerId });
+              // Destroy and recreate the connection
+              setTimeout(() => {
+                if (this.peers.has(normalizedPeerId)) {
+                  this.removePeer(normalizedPeerId, false, false);
+                  this.connectToPeer(normalizedPeerId);
+                }
+              }, 100);
+            }
+          } catch {
+            // best-effort
+          }
+        }
       } catch (err) {
         console.error(`Error adding ICE candidate from peer ${peerId}:`, err);
+      }
+      return;
+    }
+
+    // Buffer until we have a peer connection (usually created when we receive an offer).
+    const pending = this.pendingIceCandidates.get(normalizedPeerId) ?? [];
+    pending.push(candidate);
+    // Cap growth in case of misbehaving peers.
+    if (pending.length > 64) pending.splice(0, pending.length - 64);
+    this.pendingIceCandidates.set(normalizedPeerId, pending);
+  }
+
+  private flushPendingIceCandidates(peerId: string): void {
+    const normalizedPeerId = this.normalizePeerId(peerId);
+    if (!normalizedPeerId) return;
+    const peerConnection = this.peers.get(normalizedPeerId);
+    if (!peerConnection) return;
+
+    const pending = this.pendingIceCandidates.get(normalizedPeerId);
+    if (!pending || pending.length === 0) return;
+    this.pendingIceCandidates.delete(normalizedPeerId);
+
+    for (const candidate of pending) {
+      try {
+        peerConnection.peer.signal({ type: 'candidate', candidate });
+      } catch {
+        // best-effort
       }
     }
   }
@@ -663,10 +795,50 @@ export class PartialMesh {
     const peer = new SimplePeer({
       initiator,
       trickle: this.config.trickle,
-      config: { iceServers: this.config.iceServers },
+      config: { 
+        iceServers: this.config.iceServers,
+        iceTransportPolicy: 'all',
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require',
+      },
+      // More lenient timeouts for Firefox
+      offerOptions: {
+        offerToReceiveAudio: false,
+        offerToReceiveVideo: false,
+      },
+      answerOptions: {},
+      // Firefox needs more time to gather candidates - default is 5s, bump to 15s
+      iceCompleteTimeout: 15000,
     });
 
     this.log('Creating peer connection', { peerId, initiator, trickle: this.config.trickle });
+
+    // Extra diagnostics: Firefox often fails ICE without TURN, and these state
+    // transitions are the quickest signal of what's happening.
+    try {
+      const pc: RTCPeerConnection | undefined = (peer as any)?._pc;
+      if (pc) {
+        const originalIceHandler = pc.oniceconnectionstatechange;
+        pc.oniceconnectionstatechange = (event) => {
+          this.log('ICE state', { peerId, state: pc.iceConnectionState });
+          if (originalIceHandler) originalIceHandler.call(pc, event);
+        };
+        
+        const originalConnHandler = pc.onconnectionstatechange;
+        pc.onconnectionstatechange = (event) => {
+          this.log('PC connection state', { peerId, state: (pc as any).connectionState });
+          if (originalConnHandler) originalConnHandler.call(pc, event);
+        };
+        
+        const originalSigHandler = pc.onsignalingstatechange;
+        pc.onsignalingstatechange = (event) => {
+          this.log('Signaling state', { peerId, state: pc.signalingState });
+          if (originalSigHandler) originalSigHandler.call(pc, event);
+        };
+      }
+    } catch {
+      // best-effort
+    }
 
     const peerConnection: PeerConnection = {
       id: peerId,
@@ -703,7 +875,7 @@ export class PartialMesh {
         this.log('Sending answer to', peerId);
         this.uniwrtcClient.sendAnswer(signal, peerId);
       } else if (signal.candidate) {
-        this.log('Sending candidate to', peerId);
+        this.log('Sending candidate to', peerId, this.describeCandidate(signal.candidate));
         this.uniwrtcClient.sendIceCandidate(signal.candidate, peerId);
       }
     });
@@ -733,6 +905,13 @@ export class PartialMesh {
 
     peer.on('close', () => {
       this.log('Peer closed', peerId);
+      
+      // If this peer is in grace period, don't immediately remove it
+      if (this.peersInGracePeriod.has(peerId)) {
+        this.log('Peer in grace period, deferring close handling', peerId);
+        return;
+      }
+      
       this.connecting.delete(peerId);
       const t = this.connectionTimers.get(peerId);
       if (t) {
@@ -747,6 +926,60 @@ export class PartialMesh {
 
     peer.on('error', (err: any) => {
       this.log('Peer error', peerId, err);
+      
+      // Firefox can declare ICE failed before the answer arrives over signaling.
+      // If we're the initiator and haven't received the answer yet, give it
+      // a few more seconds before destroying the connection.
+      const pc: RTCPeerConnection | undefined = (peer as any)?._pc;
+      const isIceError = String(err?.message ?? '').includes('Ice connection failed');
+      const hasRemoteDescription = pc?.remoteDescription != null;
+      
+      this.log('Error check', { 
+        peerId, 
+        initiator, 
+        isIceError, 
+        hasRemoteDescription,
+        signalingState: pc?.signalingState 
+      });
+      
+      if (initiator && isIceError && !hasRemoteDescription) {
+        this.log('ICE failed before answer received, giving signaling 3s grace period', peerId);
+        this.peersInGracePeriod.add(peerId);
+        
+        setTimeout(() => {
+          // If answer arrived during grace period, handleAnswer already triggered retry
+          if (!this.peersInGracePeriod.has(peerId)) {
+            this.log('Grace period complete: answer arrived, retry already triggered', peerId);
+            this.gracePeriodAnswers.delete(peerId);
+            return;
+          }
+          
+          this.peersInGracePeriod.delete(peerId);
+          this.gracePeriodAnswers.delete(peerId);
+          
+          // Re-check: if connection recovered somehow, do nothing
+          const current = this.peers.get(peerId);
+          if (current && current.connected && !current.peer.destroyed) {
+            this.log('Grace period complete: peer recovered', peerId);
+            return;
+          }
+          
+          // Still no answer, proceed with failure
+          this.log('Grace period complete: peer still failed', peerId);
+          this.connecting.delete(peerId);
+          const t = this.connectionTimers.get(peerId);
+          if (t) {
+            clearTimeout(t);
+            this.connectionTimers.delete(peerId);
+          }
+          this.emit('peer:error', { peerId, error: err });
+          this.markPeerFailure(peerId, String(err?.message ?? 'error'));
+          this.removePeer(peerId);
+        }, 3000);
+        return;
+      }
+      
+      // Immediate failure for other errors
       this.connecting.delete(peerId);
       const t = this.connectionTimers.get(peerId);
       if (t) {
@@ -767,6 +1000,22 @@ export class PartialMesh {
     // double-count them. Our invariant is about *connected* peers.
     const currentPeerCount = this.peers.size;
     const connectedCount = this.getConnectedPeers().length;
+
+    // Hard requirement mode: do not proactively disconnect/evict/swap.
+    // We still allow connecting (optionally beyond maxPeers) and we still react
+    // to WebRTC-level disconnects.
+    if (this.config.neverDisconnectPeers) {
+      const available = this.getDiscoveredPeers().filter(
+        (peerId) => !this.peers.has(peerId) && !this.connecting.has(peerId) && !this.isCoolingDown(peerId),
+      );
+      if (available.length === 0) return;
+
+      const pickId = this.sortByXorDistance(available)[0];
+      if (pickId) {
+        this.connectToPeer(pickId);
+      }
+      return;
+    }
     const capacity = Math.max(0, this.config.maxPeers - currentPeerCount);
 
     const now = Date.now();
@@ -796,7 +1045,7 @@ export class PartialMesh {
       // ensuring progress.
       if (this.connecting.size > 0) return;
 
-      const available = Array.from(this.discoveredPeers).filter(
+      const available = this.getDiscoveredPeers().filter(
         (peerId) => !this.peers.has(peerId) && !this.connecting.has(peerId) && !this.isCoolingDown(peerId),
       );
       const needed = Math.max(0, this.config.minPeers - connectedCount);
@@ -833,7 +1082,7 @@ export class PartialMesh {
     }
 
     // If we have spare candidates, rotate connections to improve mixing.
-    const available = Array.from(this.discoveredPeers).filter(
+    const available = this.getDiscoveredPeers().filter(
       (peerId) => !this.peers.has(peerId) && !this.connecting.has(peerId) && !this.isCoolingDown(peerId),
     );
 
@@ -922,7 +1171,7 @@ export class PartialMesh {
     if (this.isCoolingDown(normalizedPeerId)) {
       return;
     }
-    if (this.peers.size >= this.config.maxPeers) {
+    if (!this.config.neverDisconnectPeers && this.peers.size >= this.config.maxPeers) {
       console.warn('Max peers reached, cannot connect to more peers');
       return;
     }
@@ -947,6 +1196,11 @@ export class PartialMesh {
     const normalizedPeerId = this.normalizePeerId(peerId);
     if (!normalizedPeerId) return;
 
+    if (this.config.neverDisconnectPeers) {
+      this.log('Refusing to disconnect (neverDisconnectPeers)', { peerId: normalizedPeerId });
+      return;
+    }
+
     // Never voluntarily drop below minPeers.
     // Remote disconnects can still happen; maintenance will heal those.
     const connected = this.getConnectedPeers().length;
@@ -970,6 +1224,7 @@ export class PartialMesh {
       }
       this.peers.delete(peerId);
       this.connecting.delete(peerId);
+      this.pendingIceCandidates.delete(peerId);
       if (forgetDiscovered) {
         this.discoveredPeers.delete(peerId);
       }
@@ -1017,6 +1272,8 @@ export class PartialMesh {
     const connected = new Set(this.getConnectedPeers());
     const result: string[] = [];
 
+    const toDelete: string[] = [];
+
     for (const peerId of this.discoveredPeers) {
       if (connected.has(peerId)) {
         result.push(peerId);
@@ -1025,7 +1282,15 @@ export class PartialMesh {
       const lastSeen = this.discoveredPeerLastSeenAtMs.get(peerId);
       if (lastSeen != null && now - lastSeen <= ttlMs) {
         result.push(peerId);
+      } else {
+        // TTL expiry: stop showing/considering this peer and free memory.
+        toDelete.push(peerId);
       }
+    }
+
+    for (const peerId of toDelete) {
+      this.discoveredPeers.delete(peerId);
+      this.discoveredPeerLastSeenAtMs.delete(peerId);
     }
 
     return result;

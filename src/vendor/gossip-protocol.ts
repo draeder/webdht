@@ -16,7 +16,7 @@ export type GossipMessage = {
 };
 
 export type GossipDirectMetadata = {
-  kind: 'direct';
+  kind: string;
   target: string;
 };
 
@@ -122,8 +122,11 @@ export class GossipProtocol {
       throw new Error('direct() requires a targetPeerId');
     }
 
+    const existingKind = (metadata as any)?.kind;
+    const kind = typeof existingKind === 'string' && existingKind.length > 0 ? existingKind : 'direct';
+
     const directMeta: GossipDirectMetadata = {
-      kind: 'direct',
+      kind,
       target,
     };
 

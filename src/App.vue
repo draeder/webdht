@@ -146,15 +146,37 @@ import { generateRandomPair } from 'unsea'
 import { IDB_STORES, getQuotaLevel, idbGetAll, idbSet, isIndexedDbAvailable, setQuotaLevel } from './idb.js'
 
 function buildIceServers() {
+  // Keep the default list small; Firefox warns that 5+ STUN/TURN servers can
+  // slow ICE candidate gathering.
   const servers = [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
     { urls: 'stun:global.stun.twilio.com:3478' },
   ]
+
+  // Optional TURN via query params (do not hardcode credentials).
+  // Example:
+  //   ?turn=turn:turn.example.com:3478?transport=tcp&turnUser=u&turnPass=p
+  // Multiple TURN URLs:
+  //   ?turn=turn:host:3478?transport=udp,turns:host:5349?transport=tcp
+  try {
+    const params = new URLSearchParams(window.location.search)
+    const rawTurn = String(params.get('turn') || '').trim()
+    if (rawTurn) {
+      const urls = rawTurn.split(',').map(s => s.trim()).filter(Boolean)
+      const username = params.get('turnUser') ? String(params.get('turnUser')) : undefined
+      const credential = params.get('turnPass') ? String(params.get('turnPass')) : undefined
+
+      // Prefer TURN first so ICE tries it early when needed.
+      servers.unshift({
+        urls: urls.length === 1 ? urls[0] : urls,
+        ...(username ? { username } : {}),
+        ...(credential ? { credential } : {}),
+      })
+    }
+  } catch {
+    // ignore (non-browser contexts)
+  }
 
   return servers
 }
@@ -472,12 +494,14 @@ export default {
         signalingServer: this.signalingServer,
         minPeers: this.meshMinPeers,
         maxPeers: this.meshMaxPeers,
-        trickle: false,
+        neverDisconnectPeers: true,
+        trickle: true,
         connectionTimeoutMs: 30000,
         // Enforce the invariant in practice: if we ever dip below minPeers
-        restartOnBelowMinPeers: true,
+        // Never proactively reset/disconnect peers.
+        restartOnBelowMinPeers: false,
         bootstrapGraceMs: 12000,
-        underConnectedResetMs: 15000,
+        underConnectedResetMs: 0,
         iceServers: buildIceServers(),
         debug: true,
       })
@@ -953,10 +977,9 @@ export default {
 
         const value = store.get(key)
         try {
-          // Broadcast the response; only the requester will have a pending entry.
-          // Note: do NOT use gossip.direct() here because direct() overwrites
-          // metadata.kind to 'direct', which would prevent routing to storage handler.
-          this.gossip.broadcast(String(value), {
+          // Use direct() so we get best-effort retries, while still keeping kind='storage'
+          // so the storage handler processes it.
+          this.gossip.direct(String(requester), String(value), {
             kind: 'storage',
             op: 'resp',
             space,
@@ -980,7 +1003,7 @@ export default {
 
         const value = store.get(key)
         try {
-          this.gossip.broadcast(String(value), {
+          this.gossip.direct(String(requester), String(value), {
             kind: 'storage',
             op: 'resp',
             space,
