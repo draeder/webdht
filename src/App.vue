@@ -570,24 +570,8 @@ export default {
       })
 
       this.mesh.on('signaling:disconnected', () => {
-        console.log('⚠️ Signaling disconnected')
-        this.connected = false
-        this.clientId = null
-        this.nodeIdShort = ''
-        this.connectedPeers = []
-        this.discoveredPeers = []
-        this.discoveredPeerLastSeenAtMs = new Map()
-        this.peerGraph = new Map()
-
-        if (this.peerSyncTimer) {
-          clearInterval(this.peerSyncTimer)
-          this.peerSyncTimer = null
-        }
-
-        if (this.peerGraphTimer) {
-          clearInterval(this.peerGraphTimer)
-          this.peerGraphTimer = null
-        }
+        // Signaling may flap, but active WebRTC peers can stay up; avoid resetting state.
+        console.log('⚠️ Signaling disconnected (peers stay connected)')
       })
 
       this.mesh.on('peer:connected', (peerId) => {

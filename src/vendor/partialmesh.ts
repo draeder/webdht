@@ -294,30 +294,40 @@ export class PartialMesh {
     });
 
     this.uniwrtcClient.on('connected', (data: { clientId: string }) => {
-      const rawClientId = data?.clientId;
-      this.clientId = this.normalizePeerId(rawClientId);
-      this.selfHash32 = this.clientId ? this.hash32(this.clientId) : null;
+      try {
+        const rawClientId = data?.clientId;
+        this.clientId = this.normalizePeerId(rawClientId);
+        this.selfHash32 = this.clientId ? this.hash32(this.clientId) : null;
 
-      // It's impossible to satisfy minPeers immediately at startup.
-      // Allow a brief bootstrap window, then enforce invariants.
-      this.bootstrapGraceUntilMs = Date.now() + Math.max(0, this.config.bootstrapGraceMs);
-      this.everReachedMinPeers = false;
+        // It's impossible to satisfy minPeers immediately at startup.
+        // Allow a brief bootstrap window, then enforce invariants.
+        this.bootstrapGraceUntilMs = Date.now() + Math.max(0, this.config.bootstrapGraceMs);
+        this.everReachedMinPeers = false;
 
-      this.emit('signaling:connected', { clientId: this.clientId, rawClientId });
-      this.log('Signaling connected as', this.clientId);
+        this.emit('signaling:connected', { clientId: this.clientId, rawClientId });
+        this.log('Signaling connected as', this.clientId);
 
-      if (this.config.autoDiscover) {
-        this.uniwrtcClient.joinSession(this.config.sessionId);
-      }
+        if (this.config.autoDiscover) {
+          this.uniwrtcClient.joinSession(this.config.sessionId);
+        }
 
-      if (this.config.autoConnect) {
-        this.startMaintenanceLoop();
+        if (this.config.autoConnect) {
+          this.startMaintenanceLoop();
+        }
+      } catch (err) {
+        console.error('Error in signaling connected handler:', err);
+        this.log('Error in signaling connected handler', err);
       }
     });
 
     this.uniwrtcClient.on('disconnected', () => {
-      this.emit('signaling:disconnected');
-      this.log('Signaling disconnected');
+      try {
+        this.emit('signaling:disconnected');
+        this.log('Signaling disconnected');
+      } catch (err) {
+        console.error('Error in signaling disconnected handler:', err);
+        this.log('Error in signaling disconnected handler', err);
+      }
     });
 
     // When UniWRTC auto-reconnects, it fires 'connected' again but we need to rejoin.
@@ -325,98 +335,133 @@ export class PartialMesh {
     // But we should also handle reconnection by clearing stale state if needed.
 
     this.uniwrtcClient.on('joined', (data: { sessionId: string; clients: string[] }) => {
-      const selfId = this.normalizePeerId(this.clientId);
-      this.log('Joined session', data.sessionId, 'with peers', data.clients?.length ?? 0);
+      try {
+        const selfId = this.normalizePeerId(this.clientId);
+        this.log('Joined session', data.sessionId, 'with peers', data.clients?.length ?? 0);
 
-      const now = Date.now();
+        const now = Date.now();
 
-      // IMPORTANT: do NOT treat the roster snapshot as authoritative.
-      // Public signaling rosters/events can be partial or briefly stale; replacing
-      // the discovered set makes "indirect" peers flicker/disappear.
-      // Instead, only refresh last-seen timestamps for peers present in the snapshot.
-      const prev = new Set(this.discoveredPeers);
+        // IMPORTANT: do NOT treat the roster snapshot as authoritative.
+        // Public signaling rosters/events can be partial or briefly stale; replacing
+        // the discovered set makes "indirect" peers flicker/disappear.
+        // Instead, only refresh last-seen timestamps for peers present in the snapshot.
+        const prev = new Set(this.discoveredPeers);
 
-      (data.clients ?? []).forEach((rawPeerId: string) => {
-        const peerId = this.normalizePeerId(rawPeerId);
-        if (peerId && peerId !== selfId) {
-          this.discoveredPeers.add(peerId);
-          this.discoveredPeerLastSeenAtMs.set(peerId, now);
+        (data.clients ?? []).forEach((rawPeerId: string) => {
+          const peerId = this.normalizePeerId(rawPeerId);
+          if (peerId && peerId !== selfId) {
+            this.discoveredPeers.add(peerId);
+            this.discoveredPeerLastSeenAtMs.set(peerId, now);
+          }
+        });
+
+        // Ensure currently-connected peers remain marked as recently seen.
+        for (const peerId of this.getConnectedPeers()) {
+          const normalized = this.normalizePeerId(peerId);
+          if (normalized && normalized !== selfId) {
+            this.discoveredPeers.add(normalized);
+            this.discoveredPeerLastSeenAtMs.set(normalized, now);
+          }
         }
-      });
 
-      // Ensure currently-connected peers remain marked as recently seen.
-      for (const peerId of this.getConnectedPeers()) {
-        const normalized = this.normalizePeerId(peerId);
-        if (normalized && normalized !== selfId) {
-          this.discoveredPeers.add(normalized);
-          this.discoveredPeerLastSeenAtMs.set(normalized, now);
+        // Emit discovered for newly-seen peers only.
+        for (const peerId of this.discoveredPeers) {
+          if (!prev.has(peerId)) {
+            this.emit('peer:discovered', peerId);
+            this.maybeEagerConnectToDiscoveredPeer(peerId, 'joined');
+          }
         }
-      }
-
-      // Emit discovered for newly-seen peers only.
-      for (const peerId of this.discoveredPeers) {
-        if (!prev.has(peerId)) {
-          this.emit('peer:discovered', peerId);
-          this.maybeEagerConnectToDiscoveredPeer(peerId, 'joined');
+        if (this.config.autoConnect) {
+          this.maintainPeerConnections();
         }
-      }
-      if (this.config.autoConnect) {
-        this.maintainPeerConnections();
+      } catch (err) {
+        console.error('Error handling joined event:', err);
+        this.log('Error handling joined event', err);
       }
     });
 
     this.uniwrtcClient.on('peer-joined', (data: { peerId: string }) => {
-      const selfId = this.normalizePeerId(this.clientId);
-      const peerId = this.normalizePeerId(data.peerId);
-      if (peerId && peerId !== selfId) {
-        this.discoveredPeers.add(peerId);
-        this.discoveredPeerLastSeenAtMs.set(peerId, Date.now());
-        this.emit('peer:discovered', peerId);
-        this.log('Peer joined', peerId);
-        this.maybeEagerConnectToDiscoveredPeer(peerId, 'peer-joined');
-        if (this.config.autoConnect) {
-          this.maintainPeerConnections();
+      try {
+        const selfId = this.normalizePeerId(this.clientId);
+        const peerId = this.normalizePeerId(data.peerId);
+        if (peerId && peerId !== selfId) {
+          this.discoveredPeers.add(peerId);
+          this.discoveredPeerLastSeenAtMs.set(peerId, Date.now());
+          this.emit('peer:discovered', peerId);
+          this.log('Peer joined', peerId);
+          this.maybeEagerConnectToDiscoveredPeer(peerId, 'peer-joined');
+          if (this.config.autoConnect) {
+            this.maintainPeerConnections();
+          }
         }
+      } catch (err) {
+        console.error('Error handling peer-joined event:', err);
+        this.log('Error handling peer-joined event', err);
       }
     });
 
     this.uniwrtcClient.on('peer-left', (data: { peerId: string }) => {
-      const peerId = this.normalizePeerId(data.peerId);
-      if (!peerId) return;
-      this.discoveredPeers.delete(peerId);
-      this.discoveredPeerLastSeenAtMs.delete(peerId);
-      // Never tear down a WebRTC peer purely because signaling says they left;
-      // public rosters can be stale/partial and WebRTC may still be healthy.
-      // In neverDisconnectPeers mode, we only forget discovery; the WebRTC link
-      // will close naturally if it is actually gone.
-      const pc = this.peers.get(peerId);
-      if (this.config.neverDisconnectPeers && pc?.connected) {
-        this.log('Ignoring peer-left for connected peer (neverDisconnectPeers)', { peerId });
-        return;
-      }
+      try {
+        const peerId = this.normalizePeerId(data.peerId);
+        if (!peerId) return;
+        this.discoveredPeers.delete(peerId);
+        this.discoveredPeerLastSeenAtMs.delete(peerId);
+        // Never tear down a WebRTC peer purely because signaling says they left;
+        // public rosters can be stale/partial and WebRTC may still be healthy.
+        // In neverDisconnectPeers mode, we only forget discovery; the WebRTC link
+        // will close naturally if it is actually gone.
+        const pc = this.peers.get(peerId);
+        if (this.config.neverDisconnectPeers && pc?.connected) {
+          this.log('Ignoring peer-left for connected peer (neverDisconnectPeers)', { peerId });
+          return;
+        }
 
-      this.removePeer(peerId, true);
-      this.log('Peer left', peerId);
+        this.removePeer(peerId, true);
+        this.log('Peer left', peerId);
+      } catch (err) {
+        console.error('Error handling peer-left event:', err);
+        this.log('Error handling peer-left event', err);
+      }
     });
 
     this.uniwrtcClient.on('offer', async (data: { peerId: string; offer: RTCSessionDescriptionInit }) => {
-      this.log('Received offer from', data.peerId);
-      await this.handleOffer(data.peerId, data.offer);
+      try {
+        this.log('Received offer from', data.peerId);
+        await this.handleOffer(data.peerId, data.offer);
+      } catch (err) {
+        console.error(`Error handling offer from peer ${data?.peerId}:`, err);
+        this.log('Error handling offer', err);
+      }
     });
 
     this.uniwrtcClient.on('answer', async (data: { peerId: string; answer: RTCSessionDescriptionInit }) => {
-      this.log('Received answer from', data.peerId);
-      await this.handleAnswer(data.peerId, data.answer);
+      try {
+        this.log('Received answer from', data.peerId);
+        await this.handleAnswer(data.peerId, data.answer);
+      } catch (err) {
+        console.error(`Error handling answer from peer ${data?.peerId}:`, err);
+        this.log('Error handling answer', err);
+      }
     });
 
     this.uniwrtcClient.on('ice-candidate', async (data: { peerId: string; candidate: RTCIceCandidateInit }) => {
-      this.log('Received ice-candidate from', data.peerId, this.describeCandidate(data?.candidate));
-      await this.handleIceCandidate(data.peerId, data.candidate);
+      try {
+        this.log('Received ice-candidate from', data.peerId, this.describeCandidate(data?.candidate));
+        await this.handleIceCandidate(data.peerId, data.candidate);
+      } catch (err) {
+        console.error(`Error handling ice-candidate from peer ${data?.peerId}:`, err);
+        this.log('Error handling ice-candidate', err);
+      }
     });
 
     this.uniwrtcClient.on('error', (error: any) => {
-      this.emit('signaling:error', error);
-      this.log('Signaling error', error);
+      try {
+        console.error('[PartialMesh] Signaling error:', error);
+        this.emit('signaling:error', error);
+        this.log('Signaling error', error);
+      } catch (err) {
+        console.error('[PartialMesh] Error in error handler:', err);
+      }
     });
 
     await this.uniwrtcClient.connect();
