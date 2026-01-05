@@ -1,6 +1,6 @@
 {
   "name": "webdht",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Vue 3 + Vite mesh demo using partialmesh, gossip-protocol, uniwrtc, and unsea.",
   "type": "module",
   "scripts": {
